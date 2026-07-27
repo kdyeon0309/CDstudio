@@ -96,25 +96,56 @@ export async function createProject(input: { title: string; artist: string }): P
   return project;
 }
 
-/** 전체 저장 (원자적: tmp → rename) */
+// ── 프로젝트별 직렬화 락 ─────────────────────────────────────
+// 같은 프로젝트에 대한 저장/갱신을 프로세스 내에서 순차 실행한다.
+// (추출 SSE·디자인 SSE·PATCH가 장시간 겹칠 수 있으므로 1인 사용이어도 필요)
+const projectWriteTails = new Map<string, Promise<unknown>>();
+
+export function withProjectLock<T>(id: string, fn: () => Promise<T>): Promise<T> {
+  const tail = projectWriteTails.get(id) ?? Promise.resolve();
+  const run = tail.then(fn, fn);
+  projectWriteTails.set(
+    id,
+    run.catch(() => {}),
+  );
+  return run;
+}
+
+/** 전체 저장 (원자적: 요청별 고유 tmp → rename) */
 export async function saveProject(project: AlbumProject): Promise<void> {
   project.updatedAt = new Date().toISOString();
   const file = await projectJsonPath(project.id);
-  const tmp = file + ".tmp";
+  const tmp = `${file}.${randomUUID()}.tmp`;
   await fs.writeFile(tmp, JSON.stringify(project, null, 2), "utf8");
   await fs.rename(tmp, file);
 }
 
-/** 부분 갱신 (읽기→병합→저장). 동시성: 1인 로컬 사용 전제로 락 없음 */
+/** 부분 갱신 (락 안에서 읽기→병합→저장) */
 export async function updateProject(
   id: string,
   patch: Partial<Omit<AlbumProject, "id" | "createdAt">>,
 ): Promise<AlbumProject | null> {
-  const project = await getProject(id);
-  if (!project) return null;
-  const merged = { ...project, ...patch, id: project.id, createdAt: project.createdAt };
-  await saveProject(merged);
-  return merged;
+  return updateProjectWith(id, (project) => ({ ...project, ...patch }));
+}
+
+/**
+ * 함수형 부분 갱신 — 락 안에서 최신 상태를 읽어 mutate 결과를 저장한다.
+ * 장시간 작업(추출/디자인) 중 다른 요청의 변경을 되돌리지 않으려면
+ * 미리 읽어둔 객체를 saveProject 하지 말고 반드시 이 함수를 사용할 것.
+ */
+export async function updateProjectWith(
+  id: string,
+  mutate: (project: AlbumProject) => AlbumProject,
+): Promise<AlbumProject | null> {
+  return withProjectLock(id, async () => {
+    const project = await getProject(id);
+    if (!project) return null;
+    const merged = mutate(project);
+    merged.id = project.id;
+    merged.createdAt = project.createdAt;
+    await saveProject(merged);
+    return merged;
+  });
 }
 
 export async function deleteProject(id: string): Promise<boolean> {
