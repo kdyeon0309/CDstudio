@@ -1,0 +1,10 @@
+import BurnClient from "./burn-client";
+
+export default async function BurnPage({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}) {
+  const { id } = await params;
+  return <BurnClient projectId={id} />;
+}
