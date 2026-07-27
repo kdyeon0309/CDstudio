@@ -17,6 +17,9 @@ import {
 const WARN_SECONDS = 74 * 60; // 74분 경고
 const MAX_SECONDS = MAX_AUDIO_MINUTES * 60; // 79분 초과 차단
 
+/** 서버가 플레이리스트 항목 상한으로 잘라냈는지 알려주는 확장 필드 (lib/audio.ts) */
+type ProbeResultView = ProbeResult & { truncated?: boolean; totalItems?: number };
+
 interface InProgress {
   trackId: string;
   title: string;
@@ -33,31 +36,41 @@ export default function TracksClient({ projectId }: { projectId: string }) {
   const [url, setUrl] = useState("");
   const [probing, setProbing] = useState(false);
   const [probeError, setProbeError] = useState<string | null>(null);
-  const [probeResult, setProbeResult] = useState<ProbeResult | null>(null);
+  const [probeResult, setProbeResult] = useState<ProbeResultView | null>(null);
   const [selected, setSelected] = useState<boolean[]>([]);
 
   const [extracting, setExtracting] = useState(false);
   const [extractError, setExtractError] = useState<string | null>(null);
   const [inProgress, setInProgress] = useState<InProgress[]>([]);
 
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [pendingTracks, setPendingTracks] = useState<Track[] | null>(null);
+
   const abortRef = useRef<AbortController | null>(null);
 
   // ── 프로젝트 로드 ─────────────────────────────────────────
-  const loadProject = useCallback(async () => {
-    try {
-      const res = await fetch(`/api/projects/${projectId}`, { cache: "no-store" });
-      if (!res.ok) throw new Error(`프로젝트 로드 실패 (${res.status})`);
-      const data = (await res.json()) as AlbumProject;
-      setProject(data);
-      setTracks([...data.tracks].sort((a, b) => a.order - b.order));
-      setLoadError(null);
-    } catch (err) {
-      setLoadError(err instanceof Error ? err.message : String(err));
-    }
-  }, [projectId]);
+  // (setState 는 콜백 안에서만 호출 — 이펙트 본문 동기 setState 경고 회피)
+  const loadProject = useCallback(
+    () =>
+      fetch(`/api/projects/${projectId}`, { cache: "no-store" })
+        .then((res) => {
+          if (!res.ok) throw new Error(`프로젝트 로드 실패 (${res.status})`);
+          return res.json() as Promise<AlbumProject>;
+        })
+        .then((data) => {
+          setProject(data);
+          setTracks([...data.tracks].sort((a, b) => a.order - b.order));
+          setLoadError(null);
+        })
+        .catch((err: unknown) => {
+          setLoadError(err instanceof Error ? err.message : String(err));
+        }),
+    [projectId],
+  );
 
   useEffect(() => {
-    loadProject();
+    void loadProject();
   }, [loadProject]);
 
   // 언마운트 시 추출 스트림 중단
@@ -80,7 +93,7 @@ export default function TracksClient({ projectId }: { projectId: string }) {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error ?? `조회 실패 (${res.status})`);
-      const result = data as ProbeResult;
+      const result = data as ProbeResultView;
       setProbeResult(result);
       setSelected(result.items.map(() => true)); // 기본 전체 선택
     } catch (err) {
@@ -120,7 +133,14 @@ export default function TracksClient({ projectId }: { projectId: string }) {
         signal: controller.signal,
       });
       if (!res.ok || !res.body) {
-        const msg = await res.text().catch(() => "");
+        const raw = await res.text().catch(() => "");
+        let msg = "";
+        try {
+          const parsed = JSON.parse(raw) as { error?: unknown };
+          if (typeof parsed?.error === "string") msg = parsed.error;
+        } catch {
+          msg = raw;
+        }
         throw new Error(msg || `추출 요청 실패 (${res.status})`);
       }
 
@@ -157,7 +177,7 @@ export default function TracksClient({ projectId }: { projectId: string }) {
       setExtracting(false);
       abortRef.current = null;
       // 서버 최종 상태와 동기화
-      loadProject();
+      void loadProject();
     }
   }
 
@@ -208,23 +228,50 @@ export default function TracksClient({ projectId }: { projectId: string }) {
   }
 
   // ── 트랙 편집 (순서/삭제) ─────────────────────────────────
+  /** 저장 실패 시 이전 상태로 롤백하고 한국어 오류를 표시한다 (재시도 가능) */
   async function persistTracks(next: Track[]) {
+    if (saving) return;
+    const previous = tracks;
     // order 필드만 재부여 (파일명 NN prefix 는 굽기 시점 기준이므로 유지)
     const renumbered = next.map((t, i) => ({ ...t, order: i + 1 }));
     setTracks(renumbered);
+    setPendingTracks(renumbered);
+    setSaveError(null);
+    setSaving(true);
     try {
       const res = await fetch(`/api/projects/${projectId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ tracks: renumbered }),
       });
-      if (res.ok) {
-        const data = (await res.json()) as AlbumProject;
-        setProject(data);
+      const data: unknown = await res.json().catch(() => null);
+      if (!res.ok) {
+        const detail =
+          data && typeof data === "object" && "error" in data
+            ? String((data as { error: unknown }).error)
+            : `HTTP ${res.status}`;
+        throw new Error(detail);
       }
-    } catch {
-      /* 로컬 상태는 이미 갱신됨 */
+      const saved = data as AlbumProject;
+      setProject(saved);
+      setTracks([...saved.tracks].sort((a, b) => a.order - b.order));
+      setPendingTracks(null);
+    } catch (err) {
+      // 서버에 반영되지 않았으므로 화면을 이전 상태로 되돌린다
+      setTracks(previous);
+      const message = err instanceof Error ? err.message : String(err);
+      setSaveError(`트랙 변경을 저장하지 못했습니다: ${message}`);
+    } finally {
+      setSaving(false);
     }
+  }
+
+  /** 마지막으로 실패한 변경을 다시 시도 */
+  function retrySave() {
+    if (!pendingTracks) return;
+    const next = pendingTracks;
+    setPendingTracks(null);
+    void persistTracks(next);
   }
 
   function moveTrack(index: number, dir: -1 | 1) {
@@ -232,12 +279,12 @@ export default function TracksClient({ projectId }: { projectId: string }) {
     if (target < 0 || target >= tracks.length) return;
     const next = [...tracks];
     [next[index], next[target]] = [next[target], next[index]];
-    persistTracks(next);
+    void persistTracks(next);
   }
 
   function deleteTrack(index: number) {
     const next = tracks.filter((_, i) => i !== index);
-    persistTracks(next);
+    void persistTracks(next);
   }
 
   // ── 총 러닝타임 상태 ──────────────────────────────────────
@@ -331,6 +378,16 @@ export default function TracksClient({ projectId }: { projectId: string }) {
               </div>
             )}
           </div>
+
+          {probeResult.truncated && (
+            <p className="mb-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-700/60 dark:bg-amber-950/40 dark:text-amber-300">
+              플레이리스트 항목이 많아 앞의 {probeResult.items.length}곡만 표시합니다
+              {typeof probeResult.totalItems === "number"
+                ? ` (전체 ${probeResult.totalItems}곡)`
+                : ""}
+              .
+            </p>
+          )}
 
           <ul className="mb-4 max-h-64 space-y-1 overflow-y-auto">
             {probeResult.items.map((item, idx) => (
@@ -437,6 +494,23 @@ export default function TracksClient({ projectId }: { projectId: string }) {
           </div>
         </div>
 
+        {saveError && (
+          <div className="mb-3 flex items-center justify-between gap-3 rounded-md border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300">
+            <span>
+              {saveError} — 변경 내용을 되돌렸습니다. 다시 시도해 주세요.
+            </span>
+            {pendingTracks && (
+              <button
+                onClick={retrySave}
+                disabled={saving}
+                className="shrink-0 rounded border border-red-400 px-2 py-1 text-xs font-medium hover:bg-red-100 disabled:opacity-40 dark:border-red-700 dark:hover:bg-red-900/40"
+              >
+                재시도
+              </button>
+            )}
+          </div>
+        )}
+
         {tracks.length === 0 ? (
           <p className="rounded-md border border-dashed border-zinc-300 px-4 py-8 text-center text-sm text-zinc-400 dark:border-zinc-700">
             아직 트랙이 없습니다. 위에서 URL을 조회해 추출하세요.
@@ -465,7 +539,7 @@ export default function TracksClient({ projectId }: { projectId: string }) {
                   <div className="flex shrink-0 items-center gap-1">
                     <button
                       onClick={() => moveTrack(idx, -1)}
-                      disabled={idx === 0}
+                      disabled={idx === 0 || saving}
                       aria-label="위로"
                       className="rounded border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-100 disabled:opacity-30 dark:border-zinc-700 dark:hover:bg-zinc-800"
                     >
@@ -473,7 +547,7 @@ export default function TracksClient({ projectId }: { projectId: string }) {
                     </button>
                     <button
                       onClick={() => moveTrack(idx, 1)}
-                      disabled={idx === tracks.length - 1}
+                      disabled={idx === tracks.length - 1 || saving}
                       aria-label="아래로"
                       className="rounded border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-100 disabled:opacity-30 dark:border-zinc-700 dark:hover:bg-zinc-800"
                     >
@@ -481,8 +555,9 @@ export default function TracksClient({ projectId }: { projectId: string }) {
                     </button>
                     <button
                       onClick={() => deleteTrack(idx)}
+                      disabled={saving}
                       aria-label="삭제"
-                      className="rounded border border-red-300 px-2 py-1 text-xs text-red-600 hover:bg-red-50 dark:border-red-800 dark:hover:bg-red-950/40"
+                      className="rounded border border-red-300 px-2 py-1 text-xs text-red-600 hover:bg-red-50 disabled:opacity-30 dark:border-red-800 dark:hover:bg-red-950/40"
                     >
                       삭제
                     </button>
