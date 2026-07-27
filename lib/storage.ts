@@ -149,8 +149,8 @@ export async function updateProjectWith(
 }
 
 export async function deleteProject(id: string): Promise<boolean> {
-  const dir = projectDir(id);
   try {
+    const dir = projectDir(id); // 잘못된 ID면 safeId가 던짐 → false
     await fs.rm(dir, { recursive: true, force: false });
     return true;
   } catch {

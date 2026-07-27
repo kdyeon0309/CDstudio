@@ -74,6 +74,10 @@ export interface ProbeResult {
   kind: "single" | "playlist";
   playlistTitle?: string;
   items: ProbeItem[];
+  /** 플레이리스트 항목 상한(100) 초과로 잘렸으면 true */
+  truncated?: boolean;
+  /** 잘리기 전 전체 항목 수 */
+  totalItems?: number;
 }
 
 export interface ProbeItem {
