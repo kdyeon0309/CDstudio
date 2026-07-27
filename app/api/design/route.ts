@@ -1,16 +1,20 @@
 import type { NextRequest } from "next/server";
 import type { ArtworkState, ArtworkVariant, DesignEvent } from "@/lib/types";
-import { getProject, updateProject } from "@/lib/storage";
+import { getProject, updateProjectWith } from "@/lib/storage";
+import { generateVariants } from "@/lib/design";
 import {
-  acquireDesignLock,
-  generateVariants,
-  releaseDesignLock,
-} from "@/lib/design";
+  acquireJobLock,
+  rejectCrossOrigin,
+  releaseJobLock,
+} from "@/lib/server-guards";
 
 export const dynamic = "force-dynamic";
 
 /** POST /api/design → body: { projectId } → SSE (DesignEvent) — 3안 생성 */
 export async function POST(request: NextRequest) {
+  const rejected = rejectCrossOrigin(request);
+  if (rejected) return rejected;
+
   let body: { projectId?: unknown };
   try {
     body = await request.json();
@@ -28,14 +32,19 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: "앨범을 찾을 수 없습니다" }, { status: 404 });
   }
 
-  if (!acquireDesignLock(projectId)) {
+  const lockKey = `design:${projectId}`;
+  const lockToken = acquireJobLock(lockKey);
+  if (!lockToken) {
     return Response.json(
       { error: "이미 이 앨범의 디자인을 생성하는 중입니다" },
       { status: 409 },
     );
   }
 
-  const signal = request.signal;
+  const abortController = new AbortController();
+  const abort = () => abortController.abort();
+  request.signal.addEventListener("abort", abort, { once: true });
+  const signal = abortController.signal;
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -86,14 +95,13 @@ export async function POST(request: NextRequest) {
           },
         });
 
-        const fresh = (await getProject(projectId)) ?? project;
+        const fresh = await getProject(projectId);
+        if (!fresh) throw new Error("디자인 저장 중 앨범이 삭제되었습니다");
         const artwork: ArtworkState = fresh.artwork ?? { variants: [] };
 
         if (generated.length === 0 && !signal.aborted) {
           send({ type: "error", message: "3안 모두 생성에 실패했습니다" });
-        }
-
-        if (!signal.aborted) {
+        } else if (!signal.aborted) {
           send({ type: "done", artwork });
         }
       } catch (err) {
@@ -105,12 +113,13 @@ export async function POST(request: NextRequest) {
         }
       } finally {
         clearInterval(heartbeat);
-        releaseDesignLock(projectId);
+        request.signal.removeEventListener("abort", abort);
+        releaseJobLock(lockKey, lockToken);
         close();
       }
     },
     cancel() {
-      releaseDesignLock(projectId);
+      abortController.abort();
     },
   });
 
@@ -126,12 +135,12 @@ export async function POST(request: NextRequest) {
 
 /** 생성된 안을 project.artwork.variants 에 병합 저장 */
 async function persistVariant(projectId: string, variant: ArtworkVariant): Promise<void> {
-  const fresh = await getProject(projectId);
-  if (!fresh) return;
-  const prev = fresh.artwork ?? { variants: [] };
-  const variants = [...prev.variants.filter((v) => v.index !== variant.index), variant].sort(
-    (a, b) => a.index - b.index,
-  );
-  const artwork: ArtworkState = { ...prev, variants };
-  await updateProject(projectId, { artwork });
+  const saved = await updateProjectWith(projectId, (project) => {
+    const prev = project.artwork ?? { variants: [] };
+    const variants = [...prev.variants.filter((v) => v.index !== variant.index), variant].sort(
+      (a, b) => a.index - b.index,
+    );
+    return { ...project, artwork: { ...prev, variants } };
+  });
+  if (!saved) throw new Error("디자인 저장 중 앨범이 삭제되었습니다");
 }
