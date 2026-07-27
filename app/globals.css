@@ -1,26 +1,61 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/*
+ * CDstudio — 다크 음악 스튜디오 테마
+ * 아날로그 콘솔 느낌: 잉크빛 근검정 바탕 + 따뜻한 앰버 액센트 + 톤다운 청록 보조.
+ * (전형적 보라 그라데이션 지양)
+ */
+@theme {
+  --color-ink: #0b0b0e;
+  --color-panel: #131318;
+  --color-panel-2: #1a1a21;
+  --color-line: #292933;
+  --color-line-strong: #3a3a46;
+  --color-fg: #ece9e4;
+  --color-fg-muted: #9a978f;
+  --color-fg-dim: #6b6862;
+  --color-amber: #e0a458;
+  --color-amber-bright: #f2b968;
+  --color-teal: #5bb8a6;
+  --color-rose: #d1685f;
+
+  --font-sans: var(--font-geist-sans), system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+html {
+  color-scheme: dark;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background:
+    radial-gradient(1200px 600px at 15% -10%, #17171d 0%, transparent 55%),
+    radial-gradient(900px 500px at 100% 0%, #14151a 0%, transparent 50%),
+    var(--color-ink);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 얇은 커스텀 스크롤바 */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-line-strong);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #4a4a58;
+  background-clip: content-box;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--color-amber) 35%, transparent);
 }
