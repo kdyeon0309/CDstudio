@@ -1,0 +1,226 @@
+.printRoot {
+  --a4-width: 210mm;
+  --a4-height: 297mm;
+  --crop-length: 4mm;
+  --crop-offset: 2mm;
+}
+
+.preview {
+  display: grid;
+  gap: 2rem;
+  justify-content: center;
+}
+
+.sheet {
+  position: relative;
+  display: flex;
+  width: var(--a4-width);
+  height: var(--a4-height);
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: white;
+  box-shadow: 0 24px 70px rgb(0 0 0 / 45%);
+  break-after: page;
+  page-break-after: always;
+}
+
+.sheet:last-child {
+  break-after: auto;
+  page-break-after: auto;
+}
+
+.part {
+  position: relative;
+  flex: none;
+  color-scheme: light;
+}
+
+.artworkFrame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: white;
+}
+
+.cropMarks {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+}
+
+.cropMarks i {
+  position: absolute;
+  width: calc(var(--crop-length) + var(--crop-offset));
+  height: calc(var(--crop-length) + var(--crop-offset));
+}
+
+.cropMarks i::before,
+.cropMarks i::after {
+  position: absolute;
+  content: "";
+  background: #111;
+}
+
+.cropMarks i::before {
+  width: var(--crop-length);
+  height: 0.2mm;
+}
+
+.cropMarks i::after {
+  width: 0.2mm;
+  height: var(--crop-length);
+}
+
+.cropTopLeft {
+  top: calc((var(--crop-length) + var(--crop-offset)) * -1);
+  left: calc((var(--crop-length) + var(--crop-offset)) * -1);
+}
+
+.cropTopRight {
+  top: calc((var(--crop-length) + var(--crop-offset)) * -1);
+  right: calc((var(--crop-length) + var(--crop-offset)) * -1);
+}
+
+.cropBottomLeft {
+  bottom: calc((var(--crop-length) + var(--crop-offset)) * -1);
+  left: calc((var(--crop-length) + var(--crop-offset)) * -1);
+}
+
+.cropBottomRight {
+  right: calc((var(--crop-length) + var(--crop-offset)) * -1);
+  bottom: calc((var(--crop-length) + var(--crop-offset)) * -1);
+}
+
+.cropTopLeft::before,
+.cropBottomLeft::before {
+  left: 0;
+}
+
+.cropTopRight::before,
+.cropBottomRight::before {
+  right: 0;
+}
+
+.cropTopLeft::after,
+.cropTopRight::after {
+  top: 0;
+}
+
+.cropBottomLeft::after,
+.cropBottomRight::after {
+  bottom: 0;
+}
+
+.cropTopLeft::before,
+.cropTopRight::before {
+  bottom: 0;
+}
+
+.cropBottomLeft::before,
+.cropBottomRight::before {
+  top: 0;
+}
+
+.cropTopLeft::after,
+.cropBottomLeft::after {
+  right: 0;
+}
+
+.cropTopRight::after,
+.cropBottomRight::after {
+  left: 0;
+}
+
+.foldLine {
+  position: absolute;
+  z-index: 4;
+  top: 0;
+  bottom: 0;
+  border-left: 0.25mm dashed rgb(24 24 27 / 80%);
+  pointer-events: none;
+}
+
+.foldLeft {
+  left: var(--spine-width);
+}
+
+.foldRight {
+  right: var(--spine-width);
+}
+
+.label {
+  border-radius: 50%;
+}
+
+.labelArtwork {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  border-radius: 50%;
+}
+
+.labelHole {
+  position: absolute;
+  z-index: 4;
+  top: 50%;
+  left: 50%;
+  width: var(--label-hole);
+  height: var(--label-hole);
+  box-sizing: border-box;
+  translate: -50% -50%;
+  border: 0.25mm solid #111;
+  border-radius: 50%;
+  background: white;
+  pointer-events: none;
+}
+
+@media screen and (max-width: 900px) {
+  .preview {
+    zoom: 0.72;
+  }
+}
+
+@media screen and (max-width: 680px) {
+  .preview {
+    zoom: 0.5;
+  }
+}
+
+@page {
+  size: A4;
+  margin: 0;
+}
+
+@media print {
+  :global(body):has(.printRoot) {
+    min-width: 0;
+    background: white !important;
+    color-scheme: light;
+  }
+
+  :global(body):has(.printRoot) > div > header,
+  .screenOnly {
+    display: none !important;
+  }
+
+  :global(main):has(.printRoot) {
+    width: auto !important;
+    max-width: none !important;
+    padding: 0 !important;
+  }
+
+  .printRoot,
+  .preview {
+    display: block;
+    margin: 0;
+    padding: 0;
+  }
+
+  .sheet {
+    margin: 0;
+    box-shadow: none;
+  }
+}
