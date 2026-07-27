@@ -85,7 +85,23 @@ export default function BurnClient({ projectId }: { projectId: string }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ projectId }),
       });
-      if (!response.ok || !response.body) throw new Error("굽기 요청을 시작하지 못했습니다.");
+      if (!response.ok) {
+        const fallback =
+          response.status === 409
+            ? "이미 다른 굽기 작업이 진행 중입니다. 완료된 뒤 다시 시도해 주세요."
+            : response.status === 403
+              ? "동일 출처 요청만 허용됩니다."
+              : "굽기 요청을 시작하지 못했습니다.";
+        let message = fallback;
+        try {
+          const detail = (await response.json()) as { error?: unknown };
+          if (typeof detail.error === "string" && detail.error) message = detail.error;
+        } catch {
+          // 본문 없음 → fallback 사용
+        }
+        throw new Error(message);
+      }
+      if (!response.body) throw new Error("굽기 요청을 시작하지 못했습니다.");
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
