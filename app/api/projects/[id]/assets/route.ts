@@ -66,9 +66,38 @@ export async function POST(request: Request, { params }: Ctx) {
     );
   }
 
+  // Content-Length 를 신뢰하지 않는다 — 본문 스트림을 상한까지만 읽고,
+  // 초과하는 즉시 중단한다 (formData() 가 무제한 버퍼링하는 것 방지).
+  const hardCap = MAX_REQUEST_BYTES + MULTIPART_OVERHEAD;
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  if (!request.body) {
+    return Response.json({ error: "요청 본문이 없습니다." }, { status: 400 });
+  }
+  const reader = request.body.getReader();
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      received += value.byteLength;
+      if (received > hardCap) {
+        await reader.cancel();
+        return Response.json(
+          { error: `업로드 용량이 너무 큽니다 (요청당 최대 ${MAX_REQUEST_BYTES / 1024 / 1024}MB).` },
+          { status: 413 },
+        );
+      }
+      chunks.push(value);
+    }
+  } catch {
+    return Response.json({ error: "본문을 읽지 못했습니다." }, { status: 400 });
+  }
+
   let form: FormData;
   try {
-    form = await request.formData();
+    form = await new Response(Buffer.concat(chunks), {
+      headers: { "content-type": request.headers.get("content-type") ?? "" },
+    }).formData();
   } catch {
     return Response.json(
       { error: "multipart/form-data 요청이 아닙니다." },

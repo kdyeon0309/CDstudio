@@ -67,6 +67,14 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  // 락 획득 전에 ID를 검증한다 — tracksDirOf가 던지면 락이 누수되기 때문.
+  let tracksDir: string;
+  try {
+    tracksDir = tracksDirOf(projectId);
+  } catch {
+    return Response.json({ error: "잘못된 프로젝트 ID입니다" }, { status: 400 });
+  }
+
   // 프로젝트별 추출 락 — 동시 추출 시 order·파일명 충돌 방지 (H1)
   const lockKey = `extract:${projectId}`;
   const lockToken = acquireJobLock(lockKey);
@@ -78,7 +86,6 @@ export async function POST(request: NextRequest) {
   }
 
   const signal = request.signal;
-  const tracksDir = tracksDirOf(projectId);
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {

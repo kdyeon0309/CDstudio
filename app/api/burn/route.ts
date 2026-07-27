@@ -34,6 +34,14 @@ export async function POST(request: Request) {
     return Response.json({ error: "올바른 JSON 요청이 아닙니다." }, { status: 400 });
   }
 
+  // 락 획득 전에 ID를 검증한다 — projectDir가 던지면 락이 누수되기 때문.
+  let stagingDirectory: string;
+  try {
+    stagingDirectory = burnStagingDir(projectDir(projectId));
+  } catch {
+    return Response.json({ error: "잘못된 프로젝트 ID입니다." }, { status: 400 });
+  }
+
   // B2: 드라이브는 1대뿐 — 전역 락. 획득한 토큰으로만 해제한다.
   const lockToken = acquireJobLock(BURN_LOCK_KEY);
   if (!lockToken) {
@@ -67,8 +75,6 @@ export async function POST(request: Request) {
       // 이미 취소·종료된 스트림
     }
   };
-
-  const stagingDirectory = burnStagingDir(projectDir(projectId));
 
   const runBurn = async () => {
     try {

@@ -286,7 +286,8 @@ export function runClaude(prompt: string, opts: RunOptions): Promise<string> {
       stdout += d.toString();
     });
     child.stderr.on("data", (d: Buffer) => {
-      stderr += d.toString();
+      // 오류 보고용이므로 마지막 64KB만 유지 (무제한 누적 방지)
+      stderr = (stderr + d.toString()).slice(-64 * 1024);
     });
 
     child.on("error", (err) => {

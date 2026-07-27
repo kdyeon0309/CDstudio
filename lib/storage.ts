@@ -104,10 +104,11 @@ const projectWriteTails = new Map<string, Promise<unknown>>();
 export function withProjectLock<T>(id: string, fn: () => Promise<T>): Promise<T> {
   const tail = projectWriteTails.get(id) ?? Promise.resolve();
   const run = tail.then(fn, fn);
-  projectWriteTails.set(
-    id,
-    run.catch(() => {}),
-  );
+  const entry = run.catch(() => {}).then(() => {
+    // 내가 등록한 entry가 여전히 마지막이면 제거 (Map 무한 성장 방지)
+    if (projectWriteTails.get(id) === entry) projectWriteTails.delete(id);
+  });
+  projectWriteTails.set(id, entry);
   return run;
 }
 

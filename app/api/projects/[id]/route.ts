@@ -1,5 +1,6 @@
 import { deleteProject, getProject, updateProjectWith } from "@/lib/storage";
 import { rejectCrossOrigin } from "@/lib/server-guards";
+import { isAllowedSourceUrl } from "@/lib/audio";
 import type {
   AlbumProject,
   AlbumStatus,
@@ -89,12 +90,21 @@ function validateTrack(value: unknown, idx: number): Track {
     fail(`tracks[${idx}].status 값이 올바르지 않습니다.`);
   }
 
+  const id = asString(o.id, `tracks[${idx}].id`, 100);
+  if (!id.trim()) fail(`tracks[${idx}].id 가 비어 있습니다.`);
+  const title = asString(o.title, `tracks[${idx}].title`);
+  if (!title.trim()) fail(`tracks[${idx}].title 이 비어 있습니다.`);
+  const sourceUrl = asString(o.sourceUrl, `tracks[${idx}].sourceUrl`, 2000);
+  if (!isAllowedSourceUrl(sourceUrl)) {
+    fail(`tracks[${idx}].sourceUrl 은 YouTube/SoundCloud 주소만 허용됩니다.`);
+  }
+
   const track: Track = {
-    id: asString(o.id, `tracks[${idx}].id`, 100),
+    id,
     order,
-    title: asString(o.title, `tracks[${idx}].title`),
+    title,
     durationSec,
-    sourceUrl: asString(o.sourceUrl, `tracks[${idx}].sourceUrl`, 2000),
+    sourceUrl,
     filename: asFilename(o.filename, `tracks[${idx}].filename`),
     status: status as TrackStatus,
   };
@@ -112,7 +122,10 @@ function validateTracks(value: unknown): Track[] {
     if (ids.has(t.id)) fail("tracks 에 중복된 id 가 있습니다.");
     ids.add(t.id);
   }
-  return tracks;
+  // order 계약(1..N 연속)은 서버가 강제한다 — 요청 순서를 존중하되 재번호 부여
+  return [...tracks]
+    .sort((a, b) => a.order - b.order)
+    .map((t, i) => ({ ...t, order: i + 1 }));
 }
 
 function validateVariant(value: unknown, idx: number): ArtworkVariant {
@@ -136,14 +149,19 @@ function validateVariant(value: unknown, idx: number): ArtworkVariant {
 function validateArtwork(value: unknown): ArtworkState {
   const o = asRecord(value, "artwork");
   if (!Array.isArray(o.variants)) fail("artwork.variants 는 배열이어야 합니다.");
-  if (o.variants.length > 10) fail("artwork.variants 가 너무 많습니다.");
-  const artwork: ArtworkState = {
-    variants: o.variants.map((v, i) => validateVariant(v, i)),
-  };
+  if (o.variants.length > 3) fail("artwork.variants 는 최대 3개입니다.");
+  const variants = o.variants.map((v, i) => validateVariant(v, i));
+  const indices = new Set<number>();
+  for (const v of variants) {
+    if (v.index < 1 || v.index > 3) fail("artwork.variants[].index 는 1~3 이어야 합니다.");
+    if (indices.has(v.index)) fail("artwork.variants 에 중복된 index 가 있습니다.");
+    indices.add(v.index);
+  }
+  const artwork: ArtworkState = { variants };
   if (o.selected !== undefined && o.selected !== null) {
     const selected = o.selected;
-    if (typeof selected !== "number" || !Number.isInteger(selected) || selected < 1) {
-      fail("artwork.selected 는 1 이상의 정수여야 합니다.");
+    if (typeof selected !== "number" || !Number.isInteger(selected) || !indices.has(selected)) {
+      fail("artwork.selected 는 존재하는 안(variant) 번호여야 합니다.");
     }
     artwork.selected = selected;
   }

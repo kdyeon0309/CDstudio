@@ -166,7 +166,8 @@ function run(cmd: string, args: string[], opts: RunOpts = {}): Promise<RunResult
       const parts = buf.split(sep);
       const rest = parts.pop() ?? "";
       for (const line of parts) cb(line);
-      return rest;
+      // 개행 없는 초장 라인도 무한히 쌓이지 않게 tail 만 유지 (M8)
+      return rest.length > TAIL_BYTES ? rest.slice(-TAIL_BYTES) : rest;
     };
 
     child.stdout.on("data", (d: Buffer) => {
