@@ -1,16 +1,20 @@
 import type { NextRequest } from "next/server";
-import type { ArtworkState, DesignEvent } from "@/lib/types";
-import { getProject, updateProject } from "@/lib/storage";
+import type { DesignEvent } from "@/lib/types";
+import { getProject, updateProjectWith } from "@/lib/storage";
+import { refineVariant } from "@/lib/design";
 import {
-  acquireDesignLock,
-  refineVariant,
-  releaseDesignLock,
-} from "@/lib/design";
+  acquireJobLock,
+  rejectCrossOrigin,
+  releaseJobLock,
+} from "@/lib/server-guards";
 
 export const dynamic = "force-dynamic";
 
 /** POST /api/design/refine → body: { projectId, variant, feedback } → SSE (DesignEvent) */
 export async function POST(request: NextRequest) {
+  const rejected = rejectCrossOrigin(request);
+  if (rejected) return rejected;
+
   let body: { projectId?: unknown; variant?: unknown; feedback?: unknown };
   try {
     body = await request.json();
@@ -41,14 +45,19 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: "앨범을 찾을 수 없습니다" }, { status: 404 });
   }
 
-  if (!acquireDesignLock(projectId)) {
+  const lockKey = `design:${projectId}`;
+  const lockToken = acquireJobLock(lockKey);
+  if (!lockToken) {
     return Response.json(
       { error: "이미 이 앨범의 디자인을 생성하는 중입니다" },
       { status: 409 },
     );
   }
 
-  const signal = request.signal;
+  const abortController = new AbortController();
+  const abort = () => abortController.abort();
+  request.signal.addEventListener("abort", abort, { once: true });
+  const signal = abortController.signal;
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -90,18 +99,19 @@ export async function POST(request: NextRequest) {
         });
 
         // project.artwork.variants 병합 저장 (같은 index 교체)
-        const fresh = (await getProject(projectId)) ?? project;
-        const prev = fresh.artwork ?? { variants: [] };
-        const variants = [
-          ...prev.variants.filter((v) => v.index !== variant.index),
-          variant,
-        ].sort((a, b) => a.index - b.index);
-        const artwork: ArtworkState = { ...prev, variants };
-        const saved = await updateProject(projectId, { artwork });
+        const saved = await updateProjectWith(projectId, (latest) => {
+          const prev = latest.artwork ?? { variants: [] };
+          const variants = [
+            ...prev.variants.filter((v) => v.index !== variant.index),
+            variant,
+          ].sort((a, b) => a.index - b.index);
+          return { ...latest, artwork: { ...prev, variants } };
+        });
+        if (!saved) throw new Error("디자인 저장 중 앨범이 삭제되었습니다");
 
         send({ type: "variant-done", variant });
         if (!signal.aborted) {
-          send({ type: "done", artwork: saved?.artwork ?? artwork });
+          send({ type: "done", artwork: saved.artwork });
         }
       } catch (err) {
         if (!signal.aborted) {
@@ -112,12 +122,13 @@ export async function POST(request: NextRequest) {
         }
       } finally {
         clearInterval(heartbeat);
-        releaseDesignLock(projectId);
+        request.signal.removeEventListener("abort", abort);
+        releaseJobLock(lockKey, lockToken);
         close();
       }
     },
     cancel() {
-      releaseDesignLock(projectId);
+      abortController.abort();
     },
   });
 

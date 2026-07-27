@@ -39,6 +39,7 @@ function ArtworkFrame({
       src={artworkUrl(projectId, variant.files[part])}
       title={title}
       loading="lazy"
+      sandbox=""
     />
   );
 }

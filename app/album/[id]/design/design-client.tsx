@@ -123,18 +123,27 @@ export default function DesignClient({ projectId }: { projectId: string }) {
 
   // ── 컨셉 저장 ─────────────────────────────────────────────
   const saveConcept = useCallback(async () => {
-    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ concept }),
-    });
-    if (res.ok) {
-      setProject((await res.json()) as AlbumProject);
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ concept }),
+      });
+      const data = (await res.json().catch(() => null)) as
+        | (AlbumProject & { error?: string })
+        | { error?: string }
+        | null;
+      if (!res.ok) {
+        throw new Error(data?.error ?? `컨셉 저장 실패 (${res.status})`);
+      }
+      setProject(data as AlbumProject);
       setConceptSaved(true);
       window.setTimeout(() => setConceptSaved(false), 2000);
       return true;
+    } catch (err) {
+      setRunError(err instanceof Error ? err.message : String(err));
+      return false;
     }
-    return false;
   }, [concept, projectId]);
 
   // ── 사진 업로드 ───────────────────────────────────────────
@@ -173,7 +182,8 @@ export default function DesignClient({ projectId }: { projectId: string }) {
     abortRef.current = controller;
 
     try {
-      await saveConcept(); // 서버가 project.concept 을 읽으므로 먼저 저장
+      const saved = await saveConcept(); // 서버가 project.concept 을 읽으므로 먼저 저장
+      if (!saved) return;
       const res = await fetch("/api/design", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -602,15 +612,7 @@ function ArtPreview({
         />
       </div>
       <figcaption className="text-[11px] text-fg-dim">
-        <a
-          href={src}
-          target="_blank"
-          rel="noreferrer"
-          className="text-fg-muted underline-offset-2 hover:text-fg hover:underline"
-        >
-          {meta.label}
-        </a>{" "}
-        · {meta.note}
+        {meta.label} · {meta.note}
       </figcaption>
     </figure>
   );

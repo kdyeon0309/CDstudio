@@ -34,6 +34,7 @@ const MAX_PHOTO_TOTAL_BYTES = 12 * 1024 * 1024; // 합계 12MB
 
 /** refine 시 기존 HTML 을 컨텍스트로 넣을 때의 문자 수 상한 */
 const MAX_CONTEXT_CHARS = 16000;
+const MAX_STDOUT_BYTES = 10 * 1024 * 1024;
 
 export const ARTWORK_PARTS: ArtworkPart[] = ["front", "back", "label"];
 
@@ -187,14 +188,32 @@ function stripDataUris(html: string, photos: Photo[]): string {
   return out;
 }
 
-/** 외부 리소스 참조 경고 (자립형 HTML 위반 감지) */
-function externalRefWarnings(html: string): string[] {
-  const warnings: string[] = [];
-  if (/<link[^>]+href=["']?https?:/i.test(html)) warnings.push("외부 스타일시트(<link>)");
-  if (/<script[^>]+src=["']?https?:/i.test(html)) warnings.push("외부 스크립트(<script src>)");
-  if (/<img[^>]+src=["']?https?:/i.test(html)) warnings.push("외부 이미지(<img src>)");
-  if (/@import\s+url\(\s*["']?https?:/i.test(html)) warnings.push("@import 외부 폰트/CSS");
-  return warnings;
+/** 정적 인쇄 HTML에서 실행 코드와 외부 리소스를 거부한다. */
+function unsafeHtmlReasons(html: string): string[] {
+  const normalized = html.replace(
+    /&#(?:x([0-9a-f]+)|([0-9]+));?/gi,
+    (_match, hex: string | undefined, decimal: string | undefined) =>
+      String.fromCodePoint(Number.parseInt(hex ?? decimal ?? "0", hex ? 16 : 10)),
+  ).replace(/&(?:colon|tab|newline);/gi, (entity) => {
+    const name = entity.toLowerCase();
+    if (name === "&colon;") return ":";
+    return name === "&tab;" ? "\t" : "\n";
+  });
+  const reasons: string[] = [];
+  if (/<script(?:\s|>)/i.test(normalized)) reasons.push("<script>");
+  if (/\son[a-z][\w:-]*\s*=/i.test(normalized)) reasons.push("인라인 이벤트 핸들러");
+  if (/javascript[\s\u0000-\u001f]*:/i.test(normalized)) reasons.push("javascript: URL");
+  if (/<link\b[^>]*\bhref\s*=\s*["']?\s*(?:https?:)?\/\//i.test(normalized)) {
+    reasons.push("외부 스타일시트(<link>)");
+  }
+  if (/<(?:img|iframe|embed|source|video|audio|object)\b[^>]*\b(?:src|data)\s*=\s*["']?\s*(?:https?:)?\/\//i.test(normalized)) {
+    reasons.push("외부 미디어");
+  }
+  if (/@import\s+(?:url\(\s*)?["']?\s*(?:https?:)?\/\//i.test(normalized)) {
+    reasons.push("@import 외부 CSS");
+  }
+  if (/url\(\s*["']?\s*(?:https?:)?\/\//i.test(normalized)) reasons.push("외부 CSS URL");
+  return [...new Set(reasons)];
 }
 
 // ── claude CLI 실행 ───────────────────────────────────────────
@@ -230,7 +249,8 @@ export function runClaude(prompt: string, opts: RunOptions): Promise<string> {
     let stdout = "";
     let stderr = "";
     let settled = false;
-    let killedBy: "timeout" | "abort" | null = null;
+    let killedBy: "timeout" | "abort" | "stdout-limit" | null = null;
+    let stdoutBytes = 0;
 
     const cleanup = () => {
       clearTimeout(timer);
@@ -244,17 +264,25 @@ export function runClaude(prompt: string, opts: RunOptions): Promise<string> {
     };
 
     const timer = setTimeout(() => {
+      if (killedBy) return;
       killedBy = "timeout";
       child.kill("SIGKILL");
     }, timeoutMs);
 
     const onAbort = () => {
+      if (killedBy) return;
       killedBy = "abort";
       child.kill("SIGKILL");
     };
     if (opts.signal) opts.signal.addEventListener("abort", onAbort, { once: true });
 
     child.stdout.on("data", (d: Buffer) => {
+      stdoutBytes += d.length;
+      if (stdoutBytes > MAX_STDOUT_BYTES) {
+        killedBy = "stdout-limit";
+        child.kill("SIGKILL");
+        return;
+      }
       stdout += d.toString();
     });
     child.stderr.on("data", (d: Buffer) => {
@@ -280,6 +308,12 @@ export function runClaude(prompt: string, opts: RunOptions): Promise<string> {
       }
       if (killedBy === "abort") {
         finish(() => reject(new DesignError("생성이 중단되었습니다")));
+        return;
+      }
+      if (killedBy === "stdout-limit") {
+        finish(() =>
+          reject(new DesignError("claude CLI 출력이 허용 크기(10MB)를 초과했습니다")),
+        );
         return;
       }
       if (code !== 0) {
@@ -537,22 +571,26 @@ async function writeVariant(
   index: number,
   parsed: ParsedVariant,
   photos: Photo[],
-  onStatus?: StatusFn,
 ): Promise<ArtworkVariant> {
   const dir = artworkDir(projectId);
   await fs.mkdir(dir, { recursive: true });
 
+  const htmlByPart = {} as Record<ArtworkPart, string>;
   for (const part of ARTWORK_PARTS) {
     const html = applyPhotos(parsed.html[part], photos);
-    const warnings = externalRefWarnings(html);
-    if (warnings.length > 0 && onStatus) {
-      onStatus(
-        `⚠ ${index}안 ${PART_LABEL[part]}에 외부 리소스 참조가 있습니다(${warnings.join(", ")}) — 오프라인 인쇄 시 누락될 수 있습니다.`,
+    const unsafeReasons = unsafeHtmlReasons(html);
+    if (unsafeReasons.length > 0) {
+      throw new DesignError(
+        `${index}안 ${PART_LABEL[part]} HTML에 허용되지 않는 내용이 있습니다: ${unsafeReasons.join(", ")}`,
       );
     }
+    htmlByPart[part] = html;
+  }
+
+  for (const part of ARTWORK_PARTS) {
     const file = path.join(dir, variantFileName(index, part));
     const tmp = `${file}.tmp`;
-    await fs.writeFile(tmp, html, "utf8");
+    await fs.writeFile(tmp, htmlByPart[part], "utf8");
     await fs.rename(tmp, file);
   }
 
@@ -592,7 +630,7 @@ export async function generateVariants(
       const prompt = buildPrompt({ project, index, photos });
       const raw = await runClaude(prompt, { cwd, signal: opts.signal });
       const parsed = parseDesignOutput(raw, `${index}안`);
-      const variant = await writeVariant(project.id, index, parsed, photos, opts.onStatus);
+      const variant = await writeVariant(project.id, index, parsed, photos);
       done.push(variant);
       opts.onStatus?.(`${index}안 "${variant.name}" 완료`);
       await opts.onVariant?.(variant);
@@ -662,23 +700,7 @@ export async function refineVariant(
 
   const raw = await runClaude(prompt, { cwd, signal: opts.signal });
   const parsed = parseDesignOutput(raw, existing?.name ?? `${index}안`);
-  const variant = await writeVariant(project.id, index, parsed, photos, opts.onStatus);
+  const variant = await writeVariant(project.id, index, parsed, photos);
   opts.onStatus?.(`${index}안 "${variant.name}" 수정 완료`);
   return variant;
-}
-
-// ── 동시 실행 방지 (1인 로컬 전제의 간단한 인메모리 락) ─────────
-
-const running = new Set<string>();
-
-export function isDesignRunning(projectId: string): boolean {
-  return running.has(projectId);
-}
-export function acquireDesignLock(projectId: string): boolean {
-  if (running.has(projectId)) return false;
-  running.add(projectId);
-  return true;
-}
-export function releaseDesignLock(projectId: string): void {
-  running.delete(projectId);
 }
