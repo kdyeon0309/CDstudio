@@ -1,36 +1,49 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# CDstudio 💿
 
-## Getting Started
+YouTube/SoundCloud 음원으로 나만의 부틀렉 오디오 CD를 만드는 **개인 소장용 로컬 웹앱**.
 
-First, run the development server:
+음원 추출 → 트랙 편집 → AI 앨범 아트 생성 → 실치수 인쇄 → CD 굽기까지, 전 과정을 하나의 위저드로 제공한다. 모든 것이 내 컴퓨터 안에서만 동작한다 (localhost 전용, 서버·계정·DB 없음).
+
+## ⚠️ 저작권 및 이용 고지
+
+- 이 프로그램은 **사적 이용(사적 복제) 목적의 개인 소장용**으로만 사용해야 한다. 대한민국 저작권법 제30조는 영리 목적이 아닌 개인적 이용을 위한 복제를 제한적으로 허용하지만, **제작한 CD·추출 음원·앨범 아트를 판매, 배포, 공유, 업로드, 대여, 공연에 사용하는 것은 저작권 침해**다.
+- 스트리밍 플랫폼의 음원 추출은 해당 플랫폼 이용약관(YouTube ToS 등)에 저촉될 수 있다. 그 판단과 책임은 전적으로 사용자 본인에게 있다.
+- 이 저장소는 배포·공유 기능을 의도적으로 포함하지 않으며, 앞으로도 추가하지 않는다.
+- 소프트웨어는 어떠한 보증 없이 "있는 그대로" 제공된다. CD-R 소모, 데이터 손실 등 사용 결과에 대한 책임은 사용자에게 있다.
+
+## 요구 사항
+
+- macOS (CD 굽기에 내장 `drutil` 사용) + USB 광학 드라이브(버너)
+- Node.js 22+
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp), [ffmpeg](https://ffmpeg.org) — `brew install yt-dlp ffmpeg`
+- [Claude Code CLI](https://claude.com/claude-code) — 앨범 아트 생성에 로컬 `claude -p` 헤드리스 호출 사용 (API 키 불필요, 구독 계정으로 로그인만 되어 있으면 됨)
+
+## 실행
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install
+npm run dev        # 개발 서버 → http://localhost:3000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+브라우저에서 `localhost:3000` 접속 후:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+1. **라이브러리** — 새 앨범 만들기
+2. **추출** — YouTube/SoundCloud URL 입력 → WAV 추출 (오디오 CD 규격 44.1kHz/16bit/스테레오 자동 변환)
+3. **트랙 편집** — 순서 조정·삭제, 총 79분 초과 시 굽기 차단
+4. **디자인** — 컨셉·사진 입력 → AI가 앞커버/뒷커버/CD라벨 3안 생성, 피드백으로 재생성
+5. **인쇄** — 실치수(앞커버 120×120mm, 뒷커버 150×118mm, 라벨 Ø116mm) 인쇄/PDF 저장. A4·배율 100%로 인쇄할 것
+6. **굽기** — 드라이브 감지 → 확인 후 `drutil`로 오디오 CD 굽기
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+앨범 데이터는 `~/CDstudio-library/`에 폴더별로 저장된다.
 
-## Learn More
+## 음질 안내
 
-To learn more about Next.js, take a look at the following resources:
+원본이 스트리밍 음원(통상 ~160kbps Opus)이므로 CD 규격으로 변환해도 원본 이상의 음질은 될 수 없다.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## 기술 스택
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Next.js (App Router) + React + TypeScript + Tailwind CSS. 단일 프로세스, 외부 도구(yt-dlp/ffmpeg/drutil/claude)는 서버 라우트에서 실행.
 
-## Deploy on Vercel
+## 라이선스
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+개인 프로젝트로, 별도 라이선스를 부여하지 않는다 (All rights reserved). 코드 참고는 자유롭게 하되, 위 저작권 고지의 취지에 어긋나는 사용은 금한다.
