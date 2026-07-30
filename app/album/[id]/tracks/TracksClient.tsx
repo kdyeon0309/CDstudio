@@ -46,8 +46,17 @@ export default function TracksClient({ projectId }: { projectId: string }) {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [pendingTracks, setPendingTracks] = useState<Track[] | null>(null);
+  const [editingTrackId, setEditingTrackId] = useState<string | null>(null);
+  const [titleDraft, setTitleDraft] = useState("");
+  const [titleError, setTitleError] = useState<string | null>(null);
+  const [draggedTrackId, setDraggedTrackId] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<{
+    trackId: string;
+    position: "before" | "after";
+  } | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
+  const dragIntentRef = useRef<string | null>(null);
 
   // ── 프로젝트 로드 ─────────────────────────────────────────
   // (setState 는 콜백 안에서만 호출 — 이펙트 본문 동기 setState 경고 회피)
@@ -227,7 +236,7 @@ export default function TracksClient({ projectId }: { projectId: string }) {
     abortRef.current?.abort();
   }
 
-  // ── 트랙 편집 (순서/삭제) ─────────────────────────────────
+  // ── 트랙 편집 (이름/순서/삭제) ───────────────────────────
   /** 저장 실패 시 이전 상태로 롤백하고 한국어 오류를 표시한다 (재시도 가능) */
   async function persistTracks(next: Track[]) {
     if (saving) return;
@@ -284,6 +293,103 @@ export default function TracksClient({ projectId }: { projectId: string }) {
 
   function deleteTrack(index: number) {
     const next = tracks.filter((_, i) => i !== index);
+    void persistTracks(next);
+  }
+
+  function startTitleEdit(track: Track) {
+    if (saving) return;
+    setEditingTrackId(track.id);
+    setTitleDraft(track.title);
+    setTitleError(null);
+  }
+
+  function cancelTitleEdit() {
+    setEditingTrackId(null);
+    setTitleDraft("");
+    setTitleError(null);
+  }
+
+  function saveTitle(trackId: string) {
+    if (saving || editingTrackId !== trackId) return;
+    const title = titleDraft.trim();
+    if (!title) {
+      setTitleError("트랙 제목을 입력해 주세요.");
+      return;
+    }
+    if (title.length > 500) {
+      setTitleError("트랙 제목은 500자 이하로 입력해 주세요.");
+      return;
+    }
+    const current = tracks.find((track) => track.id === trackId);
+    if (!current || current.title === title) {
+      cancelTitleEdit();
+      return;
+    }
+    const next = tracks.map((track) =>
+      track.id === trackId ? { ...track, title } : track,
+    );
+    cancelTitleEdit();
+    void persistTracks(next);
+  }
+
+  function handleDragStart(
+    event: React.DragEvent<HTMLLIElement>,
+    trackId: string,
+  ) {
+    if (saving || editingTrackId || dragIntentRef.current !== trackId) {
+      event.preventDefault();
+      return;
+    }
+    dragIntentRef.current = null;
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", trackId);
+    setDraggedTrackId(trackId);
+  }
+
+  function handleDragOver(
+    event: React.DragEvent<HTMLLIElement>,
+    trackId: string,
+  ) {
+    if (!draggedTrackId || draggedTrackId === trackId || saving) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    const rect = event.currentTarget.getBoundingClientRect();
+    const position =
+      event.clientY < rect.top + rect.height / 2 ? "before" : "after";
+    setDropTarget((current) =>
+      current?.trackId === trackId && current.position === position
+        ? current
+        : { trackId, position },
+    );
+  }
+
+  function resetDragState() {
+    dragIntentRef.current = null;
+    setDraggedTrackId(null);
+    setDropTarget(null);
+  }
+
+  function handleDrop(
+    event: React.DragEvent<HTMLLIElement>,
+    targetTrackId: string,
+  ) {
+    event.preventDefault();
+    const sourceTrackId =
+      draggedTrackId || event.dataTransfer.getData("text/plain");
+    const position =
+      dropTarget?.trackId === targetTrackId ? dropTarget.position : "before";
+    resetDragState();
+    if (!sourceTrackId || sourceTrackId === targetTrackId || saving) return;
+
+    const source = tracks.find((track) => track.id === sourceTrackId);
+    if (!source) return;
+    const remaining = tracks.filter((track) => track.id !== sourceTrackId);
+    const targetIndex = remaining.findIndex((track) => track.id === targetTrackId);
+    if (targetIndex < 0) return;
+    const insertIndex = targetIndex + (position === "after" ? 1 : 0);
+    const next = [...remaining];
+    next.splice(insertIndex, 0, source);
+    if (next.every((track, index) => track.id === tracks[index]?.id)) return;
     void persistTracks(next);
   }
 
@@ -520,14 +626,100 @@ export default function TracksClient({ projectId }: { projectId: string }) {
             {tracks.map((track, idx) => (
               <li
                 key={track.id}
-                className="rounded-md border border-zinc-200 p-3 dark:border-zinc-800"
+                draggable={!saving && !editingTrackId}
+                onDragStart={(event) => handleDragStart(event, track.id)}
+                onDragOver={(event) => handleDragOver(event, track.id)}
+                onDrop={(event) => handleDrop(event, track.id)}
+                onDragEnd={resetDragState}
+                className={`relative rounded-md border border-zinc-200 p-3 transition-opacity dark:border-zinc-800 ${
+                  draggedTrackId === track.id ? "opacity-40" : ""
+                } ${
+                  dropTarget?.trackId === track.id
+                    ? dropTarget.position === "before"
+                      ? "before:absolute before:inset-x-0 before:-top-1 before:h-0.5 before:bg-sky-500"
+                      : "after:absolute after:inset-x-0 after:-bottom-1 after:h-0.5 after:bg-sky-500"
+                    : ""
+                }`}
               >
                 <div className="flex items-center gap-3">
+                  <span
+                    aria-hidden="true"
+                    onMouseDown={() => {
+                      dragIntentRef.current = track.id;
+                      window.addEventListener(
+                        "mouseup",
+                        () => {
+                          dragIntentRef.current = null;
+                        },
+                        { once: true },
+                      );
+                    }}
+                    className={`shrink-0 select-none text-zinc-400 ${
+                      saving || editingTrackId
+                        ? "cursor-not-allowed opacity-30"
+                        : "cursor-grab active:cursor-grabbing"
+                    }`}
+                    title="드래그하여 순서 변경"
+                  >
+                    ⠿
+                  </span>
                   <span className="w-6 shrink-0 text-center text-sm font-semibold tabular-nums text-zinc-400">
                     {idx + 1}
                   </span>
                   <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm font-medium">{track.title}</div>
+                    {editingTrackId === track.id ? (
+                      <div>
+                        <input
+                          type="text"
+                          value={titleDraft}
+                          onChange={(event) => {
+                            setTitleDraft(event.target.value);
+                            if (titleError) setTitleError(null);
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              event.preventDefault();
+                              event.currentTarget.blur();
+                            } else if (event.key === "Escape") {
+                              event.preventDefault();
+                              cancelTitleEdit();
+                            }
+                          }}
+                          onBlur={() => saveTitle(track.id)}
+                          maxLength={500}
+                          disabled={saving}
+                          autoFocus
+                          aria-label={`${idx + 1}번 트랙 제목`}
+                          aria-invalid={Boolean(titleError)}
+                          aria-describedby={
+                            titleError ? `track-title-error-${track.id}` : undefined
+                          }
+                          className="w-full rounded border border-zinc-300 bg-white px-2 py-1 text-sm font-medium outline-none focus:border-zinc-500 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900"
+                        />
+                        {titleError && (
+                          <p
+                            id={`track-title-error-${track.id}`}
+                            role="alert"
+                            className="mt-1 text-xs text-red-600 dark:text-red-400"
+                          >
+                            {titleError}
+                          </p>
+                        )}
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => startTitleEdit(track)}
+                        disabled={saving}
+                        title="트랙 제목 수정"
+                        className="flex max-w-full items-center gap-1 text-left text-sm font-medium hover:text-sky-600 disabled:cursor-not-allowed disabled:opacity-50 dark:hover:text-sky-400"
+                      >
+                        <span className="truncate">{track.title}</span>
+                        <span aria-hidden="true" className="shrink-0 text-xs text-zinc-400">
+                          ✎
+                        </span>
+                      </button>
+                    )}
                     <div className="text-xs text-zinc-500">
                       {track.artist ? `${track.artist} · ` : ""}
                       {formatDuration(track.durationSec)}
@@ -540,7 +732,7 @@ export default function TracksClient({ projectId }: { projectId: string }) {
                     <button
                       onClick={() => moveTrack(idx, -1)}
                       disabled={idx === 0 || saving}
-                      aria-label="위로"
+                      aria-label={`${idx + 1}번 ${track.title} 위로`}
                       className="rounded border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-100 disabled:opacity-30 dark:border-zinc-700 dark:hover:bg-zinc-800"
                     >
                       ↑
@@ -548,7 +740,7 @@ export default function TracksClient({ projectId }: { projectId: string }) {
                     <button
                       onClick={() => moveTrack(idx, 1)}
                       disabled={idx === tracks.length - 1 || saving}
-                      aria-label="아래로"
+                      aria-label={`${idx + 1}번 ${track.title} 아래로`}
                       className="rounded border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-100 disabled:opacity-30 dark:border-zinc-700 dark:hover:bg-zinc-800"
                     >
                       ↓
@@ -556,7 +748,7 @@ export default function TracksClient({ projectId }: { projectId: string }) {
                     <button
                       onClick={() => deleteTrack(idx)}
                       disabled={saving}
-                      aria-label="삭제"
+                      aria-label={`${idx + 1}번 ${track.title} 삭제`}
                       className="rounded border border-red-300 px-2 py-1 text-xs text-red-600 hover:bg-red-50 disabled:opacity-30 dark:border-red-800 dark:hover:bg-red-950/40"
                     >
                       삭제
