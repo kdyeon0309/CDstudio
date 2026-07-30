@@ -6,6 +6,7 @@ import {
   cleanupBurnStaging,
   getDriveStatus,
   prepareBurnStaging,
+  resolveBurnTracks,
   validateForBurn,
 } from "@/lib/burn";
 import { acquireJobLock, rejectCrossOrigin, releaseJobLock } from "@/lib/server-guards";
@@ -92,11 +93,12 @@ export async function POST(request: Request) {
         return;
       }
 
-      // B1: project.tracks(order 순)만 스테이징해 그 디렉토리만 굽는다.
-      send({ type: "validating", message: "굽기 목록을 준비하고 있습니다." });
-      const staged = await prepareBurnStaging(project, tracksDir(projectId), stagingDirectory);
+      // B1: project.tracks(order 순)만 이미지에 담는다 — 삭제·재정렬 반영.
+      send({ type: "validating", message: "굽기 목록을 확인하고 있습니다." });
+      const staged = await resolveBurnTracks(project, tracksDir(projectId));
 
-      // H2: 스테이징된 실제 WAV 기준으로 규격·총 재생 시간을 검증한다.
+      // H2: 원본 WAV 기준으로 규격·총 재생 시간을 검증한다.
+      //     수 GB 이미지를 만들기 전에 검증해야 헛수고를 막을 수 있다.
       send({ type: "validating", message: "WAV 규격과 총 재생 시간을 확인하고 있습니다." });
       const failures = await validateForBurn(project, staged);
       if (failures.length > 0) {
@@ -104,8 +106,21 @@ export async function POST(request: Request) {
         return;
       }
 
+      // W6: 폴더 굽기는 drutil이 파일시스템 순서로 구워 트랙 순서가 뒤바뀐다.
+      //     CUE/BIN 이미지를 만들어 순서를 명시적으로 통제한다.
+      send({ type: "validating", message: "굽기 이미지를 만들고 있습니다." });
+      const staging = await prepareBurnStaging(staged, stagingDirectory, {
+        onTrack: (done, total, title) => {
+          send({ type: "log", message: `이미지 생성 중 (${done}/${total}) ${title}` });
+        },
+      });
+      if (staging.failures.length > 0) {
+        send({ type: "error", message: staging.failures.join("\n") });
+        return;
+      }
+
       let succeeded = false;
-      await burn(stagingDirectory, (event) => {
+      await burn(staging, (event) => {
         if (event.type === "done") succeeded = true;
         else send(event);
       });
