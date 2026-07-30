@@ -1,7 +1,7 @@
 import { spawn } from "child_process";
 import { promises as fs } from "fs";
 import path from "path";
-import type { AlbumProject, BurnEvent, DriveStatus, Track } from "./types";
+import type { AlbumProject, BurnEvent, BurnSettings, DriveStatus, Track } from "./types";
 import { MAX_AUDIO_MINUTES, formatDuration } from "./types";
 import { safeFilename } from "./storage";
 
@@ -267,6 +267,44 @@ export function checkDriveReady(status: DriveStatus): string | null {
   return null;
 }
 
+/** 굽기 배속 허용 범위 (drutil -speed) */
+const SPEED_MIN = 1;
+const SPEED_MAX = 48;
+/** 트랙 간격 허용 범위 (초, drutil -pregap) */
+const PREGAP_MIN = 0;
+const PREGAP_MAX = 10;
+
+function intInRange(value: unknown, min: number, max: number): number | undefined {
+  if (typeof value !== "number" || !Number.isInteger(value)) return undefined;
+  if (value < min || value > max) return undefined;
+  return value;
+}
+
+/**
+ * BurnSettings → drutil 인자 배열.
+ *
+ * 값은 반드시 정수·범위 검증 후 String(n)으로 인자 배열에 넣는다 (셸 조합 금지).
+ *
+ * drutil 인자 형식 실측(2026-07-31, macOS 15 / drutil 내장):
+ *  - `-speed <N>`  : 값 인자를 받는다. man drutil 예시 `burn -noverify -eject -speed 24 ~/Documents`.
+ *  - `-pregap <S>` : **값 인자를 받으며 단위는 초**. 드라이브 없이도 동작하는
+ *    `drutil size -audio -pregap N <dir>`의 블록 수(75블록=1초)로 확인:
+ *    미지정 1800 / 0→1650 / 1→1725 / 2→1800 / 3→1875 / 4→1950 / 5→2025.
+ *    즉 기본값은 2초이고, 1번 트랙 앞 2초 리드인은 규격상 고정이라 값은 2번 트랙부터 적용된다.
+ *    6초 이상을 주면 오류 없이 조용히 기본값(2초)으로 되돌아간다 (man: "Invalid commands are ignored").
+ */
+export function burnArgs(stagingDirectory: string, settings?: BurnSettings): string[] {
+  const options: string[] = [];
+
+  const speed = intInRange(settings?.speed, SPEED_MIN, SPEED_MAX);
+  if (speed !== undefined) options.push("-speed", String(speed));
+
+  const pregapSec = intInRange(settings?.pregapSec, PREGAP_MIN, PREGAP_MAX);
+  if (pregapSec !== undefined) options.push("-pregap", String(pregapSec));
+
+  return ["burn", "-audio", ...options, stagingDirectory, "-noverify", "-eject"];
+}
+
 /**
  * 스테이징 디렉토리를 오디오 CD로 굽는다.
  *
@@ -276,13 +314,12 @@ export function checkDriveReady(status: DriveStatus): string | null {
 export function burn(
   stagingDirectory: string,
   onEvent: (event: BurnEvent) => void,
+  settings?: BurnSettings,
 ): Promise<void> {
   return new Promise((resolve) => {
-    const child = spawn(
-      DRUTIL,
-      ["burn", "-audio", stagingDirectory, "-noverify", "-eject"],
-      { stdio: ["ignore", "pipe", "pipe"] },
-    );
+    const child = spawn(DRUTIL, burnArgs(stagingDirectory, settings), {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
     let stdoutRemainder = "";
     let stderrRemainder = "";
 
