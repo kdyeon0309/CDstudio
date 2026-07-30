@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import type { AlbumProject, ArtworkPart, ArtworkVariant } from "@/lib/types";
-import { PRINT_SPECS } from "@/lib/types";
+import { ARTWORK_PARTS, PART_LABELS, PRINT_SPECS } from "@/lib/types";
 import styles from "./print.module.css";
 
 function artworkUrl(projectId: string, filename: string) {
@@ -24,23 +24,109 @@ function CropMarks() {
 
 function ArtworkFrame({
   projectId,
-  variant,
-  part,
+  filename,
   title,
 }: {
   projectId: string;
-  variant: ArtworkVariant;
-  part: ArtworkPart;
+  filename: string;
   title: string;
 }) {
   return (
     <iframe
       className={styles.artworkFrame}
-      src={artworkUrl(projectId, variant.files[part])}
+      src={artworkUrl(projectId, filename)}
       title={title}
       loading="lazy"
       sandbox=""
     />
+  );
+}
+
+function partStyle(part: ArtworkPart): React.CSSProperties {
+  if (part === "label") {
+    const spec = PRINT_SPECS.label;
+    return {
+      width: `${spec.outerDiameterMm}mm`,
+      height: `${spec.outerDiameterMm}mm`,
+      "--label-hole": `${spec.innerDiameterMm}mm`,
+    } as React.CSSProperties;
+  }
+
+  const spec = PRINT_SPECS[part];
+  return {
+    width: `${spec.widthMm}mm`,
+    height: `${spec.heightMm}mm`,
+    ...("spineMm" in spec
+      ? { "--spine-width": `${spec.spineMm}mm` }
+      : {}),
+  } as React.CSSProperties;
+}
+
+function ArtworkPage({
+  projectId,
+  projectTitle,
+  variant,
+  part,
+}: {
+  projectId: string;
+  projectTitle: string;
+  variant: ArtworkVariant;
+  part: ArtworkPart;
+}) {
+  const filename = variant.files[part];
+  const label = PART_LABELS[part];
+  const isLabel = part === "label";
+  const hasFoldLines = part === "back" || part === "back-inner";
+
+  return (
+    <section
+      className={`${styles.sheet} ${filename ? "" : styles.emptySheet}`}
+      aria-label={`${label} 인쇄 페이지`}
+    >
+      <span className={`${styles.partName} ${styles.screenOnly}`}>{label}</span>
+      <div
+        className={`${styles.part} ${isLabel ? styles.label : ""} ${
+          filename ? "" : styles.emptyPart
+        }`}
+        style={partStyle(part)}
+      >
+        {filename ? (
+          <>
+            <CropMarks />
+            {isLabel ? (
+              <div className={styles.labelArtwork}>
+                <ArtworkFrame
+                  projectId={projectId}
+                  filename={filename}
+                  title={`${projectTitle} ${label}`}
+                />
+              </div>
+            ) : (
+              <ArtworkFrame
+                projectId={projectId}
+                filename={filename}
+                title={`${projectTitle} ${label}`}
+              />
+            )}
+            {hasFoldLines && (
+              <>
+                <span
+                  className={`${styles.foldLine} ${styles.foldLeft}`}
+                  aria-hidden="true"
+                />
+                <span
+                  className={`${styles.foldLine} ${styles.foldRight}`}
+                  aria-hidden="true"
+                />
+              </>
+            )}
+            {isLabel && <span className={styles.labelHole} aria-hidden="true" />}
+          </>
+        ) : (
+          <p className={styles.emptyMessage}>이 영역은 비어 있음 (인쇄 제외)</p>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -95,7 +181,11 @@ export default function PrintClient({ projectId }: { projectId: string }) {
     );
   }
 
-  if (!selectedVariant) {
+  const hasPrintablePart = ARTWORK_PARTS.some(
+    (part) => selectedVariant?.files[part],
+  );
+
+  if (!selectedVariant || !hasPrintablePart) {
     return (
       <section className="mx-auto max-w-xl rounded-2xl border border-line bg-panel p-8 text-center shadow-2xl">
         <p className="font-mono text-xs uppercase tracking-[0.18em] text-amber">
@@ -105,7 +195,7 @@ export default function PrintClient({ projectId }: { projectId: string }) {
           먼저 디자인 단계에서 아트워크를 생성·선택하세요
         </h2>
         <p className="mt-2 text-sm leading-6 text-fg-muted">
-          앞커버, 뒷커버, CD 라벨이 준비되면 실물 크기로 미리 보고 인쇄할 수 있습니다.
+          인쇄할 아트워크 영역이 준비되면 실물 크기로 미리 보고 인쇄할 수 있습니다.
         </p>
         <Link
           href={`/album/${encodeURIComponent(projectId)}/design`}
@@ -116,21 +206,6 @@ export default function PrintClient({ projectId }: { projectId: string }) {
       </section>
     );
   }
-
-  const frontStyle = {
-    width: `${PRINT_SPECS.front.widthMm}mm`,
-    height: `${PRINT_SPECS.front.heightMm}mm`,
-  };
-  const backStyle = {
-    width: `${PRINT_SPECS.back.widthMm}mm`,
-    height: `${PRINT_SPECS.back.heightMm}mm`,
-    "--spine-width": `${PRINT_SPECS.back.spineMm}mm`,
-  } as React.CSSProperties;
-  const labelStyle = {
-    width: `${PRINT_SPECS.label.outerDiameterMm}mm`,
-    height: `${PRINT_SPECS.label.outerDiameterMm}mm`,
-    "--label-hole": `${PRINT_SPECS.label.innerDiameterMm}mm`,
-  } as React.CSSProperties;
 
   return (
     <div className={styles.printRoot}>
@@ -154,46 +229,15 @@ export default function PrintClient({ projectId }: { projectId: string }) {
       </header>
 
       <div className={styles.preview}>
-        <section className={styles.sheet} aria-label="앞커버 인쇄 페이지">
-          <div className={styles.part} style={frontStyle}>
-            <CropMarks />
-            <ArtworkFrame
-              projectId={projectId}
-              variant={selectedVariant}
-              part="front"
-              title={`${project.title} 앞커버`}
-            />
-          </div>
-        </section>
-
-        <section className={styles.sheet} aria-label="뒷커버 인쇄 페이지">
-          <div className={styles.part} style={backStyle}>
-            <CropMarks />
-            <ArtworkFrame
-              projectId={projectId}
-              variant={selectedVariant}
-              part="back"
-              title={`${project.title} 뒷커버`}
-            />
-            <span className={`${styles.foldLine} ${styles.foldLeft}`} aria-hidden="true" />
-            <span className={`${styles.foldLine} ${styles.foldRight}`} aria-hidden="true" />
-          </div>
-        </section>
-
-        <section className={styles.sheet} aria-label="CD 라벨 인쇄 페이지">
-          <div className={`${styles.part} ${styles.label}`} style={labelStyle}>
-            <CropMarks />
-            <div className={styles.labelArtwork}>
-              <ArtworkFrame
-                projectId={projectId}
-                variant={selectedVariant}
-                part="label"
-                title={`${project.title} CD 라벨`}
-              />
-            </div>
-            <span className={styles.labelHole} aria-hidden="true" />
-          </div>
-        </section>
+        {ARTWORK_PARTS.map((part) => (
+          <ArtworkPage
+            key={part}
+            projectId={projectId}
+            projectTitle={project.title}
+            variant={selectedVariant}
+            part={part}
+          />
+        ))}
       </div>
     </div>
   );

@@ -25,6 +25,16 @@
   page-break-after: always;
 }
 
+.partName {
+  position: absolute;
+  top: 8mm;
+  left: 50%;
+  translate: -50% 0;
+  color: #52525b;
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+
 .sheet:last-child {
   break-after: auto;
   page-break-after: auto;
@@ -34,6 +44,22 @@
   position: relative;
   flex: none;
   color-scheme: light;
+}
+
+.emptyPart {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  border: 0.25mm dashed #a1a1aa;
+  background: #f4f4f5;
+}
+
+.emptyMessage {
+  margin: 0;
+  color: #71717a;
+  font-size: 0.875rem;
+  font-weight: 600;
 }
 
 .artworkFrame {
@@ -203,6 +229,10 @@
 
   :global(body):has(.printRoot) > div > header,
   .screenOnly {
+    display: none !important;
+  }
+
+  .emptySheet {
     display: none !important;
   }
 
