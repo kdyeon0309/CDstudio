@@ -1,146 +1,110 @@
 import type { NextRequest } from "next/server";
-import type { ArtworkState, ArtworkVariant, DesignEvent } from "@/lib/types";
-import { getProject, updateProjectWith } from "@/lib/storage";
-import { generateVariants } from "@/lib/design";
+import type { ArtworkState } from "@/lib/types";
+import { getProject } from "@/lib/storage";
+import { generateVariants, resolvePartModes } from "@/lib/design";
+import { ARTWORK_PARTS, PART_LABELS } from "@/lib/types";
+import { rejectCrossOrigin } from "@/lib/server-guards";
+import { designSseResponse } from "./stream";
 import {
-  acquireJobLock,
-  rejectCrossOrigin,
-  releaseJobLock,
-} from "@/lib/server-guards";
+  MAX_VARIANTS,
+  acquireDesignLock,
+  badRequest,
+  designBusyResponse,
+  loadProject,
+  persistVariant,
+  readBody,
+  readProjectId,
+} from "./shared";
 
 export const dynamic = "force-dynamic";
 
-/** POST /api/design → body: { projectId } → SSE (DesignEvent) — 3안 생성 */
+/**
+ * POST /api/design
+ *  body: { projectId, regenerate?: "all" | "missing" } → SSE (DesignEvent)
+ *  - "all"(기본): 1~3안을 모두 만든다 (기존 안 덮어쓰기)
+ *  - "missing"  : 이미 있는 안은 그대로 두고 비어 있는 슬롯만 만든다
+ *  영역별 제작 방식(artwork.partModes)에 따라 ai / photo / template / blank 로 처리된다.
+ */
 export async function POST(request: NextRequest) {
   const rejected = rejectCrossOrigin(request);
   if (rejected) return rejected;
 
-  let body: { projectId?: unknown };
-  try {
-    body = await request.json();
-  } catch {
-    return Response.json({ error: "잘못된 요청 본문입니다" }, { status: 400 });
+  const body = await readBody(request);
+  if (!body) return badRequest("잘못된 요청 본문입니다");
+
+  const projectId = readProjectId(body);
+  if (!projectId) return badRequest("projectId 가 필요합니다");
+
+  const regenerate = body.regenerate === "missing" ? "missing" : "all";
+
+  const project = await loadProject(projectId);
+  if (!project) return badRequest("앨범을 찾을 수 없습니다", 404);
+
+  const modes = resolvePartModes(project);
+  if (ARTWORK_PARTS.every((part) => modes[part] === "blank")) {
+    return badRequest("모든 영역이 '비움'입니다 — 최소 한 영역의 제작 방식을 정해 주세요");
   }
+  // photo 모드인데 사진이 지정되지 않은 영역은 미리 알려준다 (생성 자체는 진행)
+  const photoWithoutFile = ARTWORK_PARTS.filter(
+    (part) => modes[part] === "photo" && !project.artwork?.partPhotos?.[part],
+  );
 
-  const projectId = typeof body.projectId === "string" ? body.projectId : "";
-  if (!projectId) {
-    return Response.json({ error: "projectId 가 필요합니다" }, { status: 400 });
-  }
+  const allIndexes = Array.from({ length: MAX_VARIANTS }, (_, i) => i + 1);
+  const filled = new Set(
+    (project.artwork?.variants ?? [])
+      .filter((v) => Object.keys(v.files ?? {}).length > 0)
+      .map((v) => v.index),
+  );
+  const indexes = regenerate === "missing" ? allIndexes.filter((i) => !filled.has(i)) : allIndexes;
 
-  const project = await getProject(projectId).catch(() => null);
-  if (!project) {
-    return Response.json({ error: "앨범을 찾을 수 없습니다" }, { status: 404 });
-  }
+  const lock = acquireDesignLock(projectId);
+  if (!lock) return designBusyResponse();
 
-  const lockKey = `design:${projectId}`;
-  const lockToken = acquireJobLock(lockKey);
-  if (!lockToken) {
-    return Response.json(
-      { error: "이미 이 앨범의 디자인을 생성하는 중입니다" },
-      { status: 409 },
-    );
-  }
+  return designSseResponse(request, lock, async ({ send, signal }) => {
+    if (indexes.length === 0) {
+      send({ type: "status", message: "비어 있는 안이 없습니다." });
+      const fresh = await getProject(projectId);
+      send({ type: "done", artwork: fresh?.artwork ?? { variants: [] } });
+      return;
+    }
 
-  const abortController = new AbortController();
-  const abort = () => abortController.abort();
-  request.signal.addEventListener("abort", abort, { once: true });
-  const signal = abortController.signal;
+    send({
+      type: "status",
+      message:
+        regenerate === "missing"
+          ? `비어 있는 ${indexes.join("·")}안을 생성합니다…`
+          : "디자인 생성을 준비합니다…",
+    });
+    for (const part of photoWithoutFile) {
+      send({
+        type: "status",
+        message: `${PART_LABELS[part]}: 사진 모드인데 사용할 사진이 없습니다 — 이 영역은 건너뜁니다.`,
+      });
+    }
 
-  const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      const encoder = new TextEncoder();
-      let closed = false;
-      const send = (event: DesignEvent) => {
-        if (closed) return;
-        try {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
-        } catch {
-          closed = true;
-        }
-      };
-      const close = () => {
-        if (closed) return;
-        closed = true;
-        try {
-          controller.close();
-        } catch {
-          /* already closed */
-        }
-      };
+    const generated = await generateVariants(project, {
+      signal,
+      indexes,
+      onStatus: (message) => send({ type: "status", message }),
+      onVariantError: (index, message) =>
+        send({ type: "status", message: `${index}안 생성 실패: ${message}` }),
+      onVariant: async (variant) => {
+        // 안 하나가 끝날 때마다 project.json 갱신 (중간에 끊겨도 결과 보존)
+        await persistVariant(projectId, variant);
+        send({ type: "variant-done", variant });
+      },
+    });
 
-      // 오래 걸리는 호출 동안 연결 유지 + 경과 시간 안내
-      const startedAt = Date.now();
-      const heartbeat = setInterval(() => {
-        if (closed) return;
-        const sec = Math.round((Date.now() - startedAt) / 1000);
-        try {
-          controller.enqueue(encoder.encode(`: keep-alive ${sec}s\n\n`));
-        } catch {
-          closed = true;
-        }
-      }, 10000);
+    if (signal.aborted) return;
 
-      try {
-        send({ type: "status", message: "디자인 생성을 준비합니다…" });
+    const fresh = await getProject(projectId);
+    if (!fresh) throw new Error("디자인 저장 중 앨범이 삭제되었습니다");
+    const artwork: ArtworkState = fresh.artwork ?? { variants: [] };
 
-        const generated = await generateVariants(project, {
-          signal,
-          onStatus: (message) => send({ type: "status", message }),
-          onVariantError: (index, message) =>
-            send({ type: "status", message: `${index}안 생성 실패: ${message}` }),
-          onVariant: async (variant) => {
-            // 안 하나가 끝날 때마다 project.json 갱신 (중간에 끊겨도 결과 보존)
-            await persistVariant(projectId, variant);
-            send({ type: "variant-done", variant });
-          },
-        });
-
-        const fresh = await getProject(projectId);
-        if (!fresh) throw new Error("디자인 저장 중 앨범이 삭제되었습니다");
-        const artwork: ArtworkState = fresh.artwork ?? { variants: [] };
-
-        if (generated.length === 0 && !signal.aborted) {
-          send({ type: "error", message: "3안 모두 생성에 실패했습니다" });
-        } else if (!signal.aborted) {
-          send({ type: "done", artwork });
-        }
-      } catch (err) {
-        if (!signal.aborted) {
-          send({
-            type: "error",
-            message: err instanceof Error ? err.message : String(err),
-          });
-        }
-      } finally {
-        clearInterval(heartbeat);
-        request.signal.removeEventListener("abort", abort);
-        releaseJobLock(lockKey, lockToken);
-        close();
-      }
-    },
-    cancel() {
-      abortController.abort();
-    },
+    if (generated.length === 0) {
+      send({ type: "error", message: `${indexes.length}개 안 모두 생성에 실패했습니다` });
+      return;
+    }
+    send({ type: "done", artwork });
   });
-
-  return new Response(stream, {
-    headers: {
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache, no-transform",
-      Connection: "keep-alive",
-      "X-Accel-Buffering": "no",
-    },
-  });
-}
-
-/** 생성된 안을 project.artwork.variants 에 병합 저장 */
-async function persistVariant(projectId: string, variant: ArtworkVariant): Promise<void> {
-  const saved = await updateProjectWith(projectId, (project) => {
-    const prev = project.artwork ?? { variants: [] };
-    const variants = [...prev.variants.filter((v) => v.index !== variant.index), variant].sort(
-      (a, b) => a.index - b.index,
-    );
-    return { ...project, artwork: { ...prev, variants } };
-  });
-  if (!saved) throw new Error("디자인 저장 중 앨범이 삭제되었습니다");
 }
