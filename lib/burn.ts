@@ -328,7 +328,9 @@ export function burnArgs(stagingDirectory: string, settings?: BurnSettings): str
   const pregapSec = intInRange(settings?.pregapSec, PREGAP_MIN, PREGAP_MAX);
   if (pregapSec !== undefined) options.push("-pregap", String(pregapSec));
 
-  return ["burn", "-audio", ...options, stagingDirectory, "-noverify", "-eject"];
+  // drutil 문법: burn (burn-options) <path> — 경로는 반드시 마지막.
+  // 경로 뒤에 옵션을 두면 usage 도움말과 함께 종료 코드 1로 실패한다 (실드라이브에서 확인).
+  return ["burn", "-audio", "-noverify", "-eject", ...options, stagingDirectory];
 }
 
 /**
