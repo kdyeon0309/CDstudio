@@ -7,6 +7,7 @@ import type {
   ArtworkPart,
   ArtworkState,
   ArtworkVariant,
+  BurnSettings,
   PartMode,
   Track,
   TrackStatus,
@@ -25,6 +26,7 @@ const PATCHABLE = [
   "status",
   "tracks",
   "artwork",
+  "burnSettings",
   "burnedAt",
 ] as const;
 type PatchableKey = (typeof PATCHABLE)[number];
@@ -235,6 +237,34 @@ function validatePatch(body: Record<string, unknown>): ValidPatch {
       case "artwork":
         patch.artwork = validateArtwork(value);
         break;
+      case "burnSettings": {
+        const o = asRecord(value, "burnSettings");
+        const settings: BurnSettings = {};
+        if (o.speed !== undefined && o.speed !== null) {
+          if (
+            typeof o.speed !== "number" ||
+            !Number.isInteger(o.speed) ||
+            o.speed < 1 ||
+            o.speed > 48
+          ) {
+            fail("burnSettings.speed 는 1~48 사이 정수여야 합니다.");
+          }
+          settings.speed = o.speed;
+        }
+        if (o.pregapSec !== undefined && o.pregapSec !== null) {
+          if (
+            typeof o.pregapSec !== "number" ||
+            !Number.isFinite(o.pregapSec) ||
+            o.pregapSec < 0 ||
+            o.pregapSec > 10
+          ) {
+            fail("burnSettings.pregapSec 는 0~10초 사이여야 합니다.");
+          }
+          settings.pregapSec = o.pregapSec;
+        }
+        patch.burnSettings = settings;
+        break;
+      }
       case "burnedAt":
         if (value === null) break; // 무시
         patch.burnedAt = asString(value, "burnedAt", 40);

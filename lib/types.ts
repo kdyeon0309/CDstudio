@@ -49,8 +49,22 @@ export interface AlbumProject {
   updatedAt: string;
   tracks: Track[]; // order 오름차순 유지
   artwork: ArtworkState;
+  burnSettings?: BurnSettings;
   burnedAt?: string;
 }
+
+/** 굽기 설정 (프로젝트에 저장, 굽기 요청 시 사용) */
+export interface BurnSettings {
+  /** 굽기 배속 (drutil -speed). 미지정 = 드라이브 최대 속도 */
+  speed?: number;
+  /** 트랙 사이 간격(초, drutil -pregap). 미지정 = drutil 기본(2초) */
+  pregapSec?: number;
+}
+
+/** UI에서 제공하는 배속 선택지 (낮을수록 안정적) */
+export const BURN_SPEEDS: readonly number[] = [4, 8, 16, 24];
+/** 트랙 간격 선택지 (초) */
+export const PREGAP_CHOICES: readonly number[] = [0, 1, 2, 3];
 
 export interface Track {
   id: string; // uuid
