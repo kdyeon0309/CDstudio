@@ -42,9 +42,9 @@ function parseBurnSettings(
       typeof pregapSec !== "number" ||
       !Number.isInteger(pregapSec) ||
       pregapSec < 0 ||
-      pregapSec > 10
+      pregapSec > 5 // drutil은 6초 이상을 조용히 기본 2초로 되돌린다
     ) {
-      return { ok: false, error: "pregapSec는 0~10 사이의 정수여야 합니다." };
+      return { ok: false, error: "pregapSec는 0~5 사이의 정수여야 합니다." };
     }
     settings.pregapSec = pregapSec;
   }

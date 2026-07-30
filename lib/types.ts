@@ -57,7 +57,7 @@ export interface AlbumProject {
 export interface BurnSettings {
   /** 굽기 배속 (drutil -speed). 미지정 = 드라이브 최대 속도 */
   speed?: number;
-  /** 트랙 사이 간격(초, drutil -pregap). 미지정 = drutil 기본(2초) */
+  /** 트랙 사이 간격(초, drutil -pregap, 유효 0~5 — 6 이상은 drutil이 기본 2초로 무시). 미지정 = 기본 2초 */
   pregapSec?: number;
 }
 

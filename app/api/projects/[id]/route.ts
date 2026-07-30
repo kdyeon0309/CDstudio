@@ -256,9 +256,9 @@ function validatePatch(body: Record<string, unknown>): ValidPatch {
             typeof o.pregapSec !== "number" ||
             !Number.isFinite(o.pregapSec) ||
             o.pregapSec < 0 ||
-            o.pregapSec > 10
+            o.pregapSec > 5
           ) {
-            fail("burnSettings.pregapSec 는 0~10초 사이여야 합니다.");
+            fail("burnSettings.pregapSec 는 0~5초 사이여야 합니다.");
           }
           settings.pregapSec = o.pregapSec;
         }
