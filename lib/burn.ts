@@ -43,17 +43,20 @@ export async function getDriveStatus(): Promise<DriveStatus> {
   try {
     const result = await run(DRUTIL, ["status"]);
     const raw = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
-    if (result.code !== 0 || !raw || /no (optical )?drive|no device|not found/i.test(raw)) {
+    const type = field(raw, "Type");
+    // 드라이브가 있어도 drutil이 0이 아닌 코드로 끝나는 경우가 있어,
+    // Type 필드가 파싱되면 출력을 신뢰한다.
+    if (!raw || /no (optical )?drive|no device found/i.test(raw) || (result.code !== 0 && !type)) {
       return { connected: false, mediaPresent: false, blank: false, erasable: false, raw };
     }
 
-    const type = field(raw, "Type");
     const mediaPresent =
       !!type &&
       !/no media|none|unknown/i.test(type) &&
       !/no media|please insert|tray open/i.test(raw);
+    // 실제 출력 형식: "Writability: appendable, blank, overwritable"
+    const writability = field(raw, "Writability") ?? "";
     const blankValue = field(raw, "Blank");
-    const writableValue = field(raw, "Writable");
     const erasableValue = field(raw, "Erasable");
     const spaceFree = field(raw, "Space Free");
     const minuteMatch = spaceFree?.match(/(\d+(?:\.\d+)?)\s*(?:min|minute)/i);
@@ -64,16 +67,39 @@ export async function getDriveStatus(): Promise<DriveStatus> {
         ? Number(msfMatch[1]) + Number(msfMatch[2]) / 60 + Number(msfMatch[3] ?? 0) / 4500
         : undefined;
 
+    // "Vendor   Product   Rev" 헤더 다음 줄에서 벤더/제품명 추출 (없으면 undefined)
+    let vendor = field(raw, "Vendor");
+    let product = field(raw, "Product");
+    if (!vendor) {
+      const lines = raw.split("\n");
+      const header = lines.findIndex((l) => /^\s*Vendor\s+Product\s+Rev\s*$/i.test(l));
+      const value = header >= 0 ? lines[header + 1]?.trim() : undefined;
+      if (value) {
+        const parts = value.split(/\s+/);
+        if (parts.length >= 2) {
+          vendor = parts[0];
+          product = parts.slice(1, -1).join(" ") || parts[1];
+        }
+      }
+    }
+
     return {
       connected: true,
-      vendor: field(raw, "Vendor"),
-      product: field(raw, "Product"),
+      vendor,
+      product,
       mediaPresent,
-      blank: mediaPresent && (positiveValue(blankValue) || /\bblank\b/i.test(type ?? "")),
-      erasable: mediaPresent && (positiveValue(erasableValue) || /CD-RW/i.test(type ?? "")),
+      blank:
+        mediaPresent &&
+        (/\bblank\b/i.test(writability) ||
+          positiveValue(blankValue) ||
+          /\bblank\b/i.test(type ?? "")),
+      erasable:
+        mediaPresent &&
+        (/\berasable\b/i.test(writability) ||
+          positiveValue(erasableValue) ||
+          /CD-RW/i.test(type ?? "")),
       writableMinutes,
       raw,
-      ...(positiveValue(writableValue) && !mediaPresent ? { mediaPresent: true } : {}),
     };
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error);
