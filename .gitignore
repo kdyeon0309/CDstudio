@@ -42,3 +42,9 @@ next-env.d.ts
 
 # user local dirs
 .config/
+
+# agent orchestration files (local only)
+CLAUDE.md
+AGENTS.md
+WORKLOG.md
+.claude/
