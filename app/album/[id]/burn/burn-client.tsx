@@ -1,8 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AlbumProject, BurnEvent, DriveStatus } from "@/lib/types";
-import { formatDuration, MAX_AUDIO_MINUTES, totalDurationSec } from "@/lib/types";
+import type { AlbumProject, BurnEvent, BurnSettings, DriveStatus } from "@/lib/types";
+import {
+  BURN_SPEEDS,
+  formatDuration,
+  MAX_AUDIO_MINUTES,
+  PREGAP_CHOICES,
+  totalDurationSec,
+} from "@/lib/types";
 
 const EMPTY_DRIVE: DriveStatus = {
   connected: false,
@@ -11,6 +17,11 @@ const EMPTY_DRIVE: DriveStatus = {
   erasable: false,
   raw: "",
 };
+
+/** 배속 select의 "최대 속도" 항목 값 (speed 미지정) */
+const MAX_SPEED = "max";
+/** 트랙 간격 기본값 (drutil 기본과 동일한 2초) */
+const DEFAULT_PREGAP_SEC = 2;
 
 export default function BurnClient({ projectId }: { projectId: string }) {
   const [project, setProject] = useState<AlbumProject | null>(null);
@@ -22,6 +33,9 @@ export default function BurnClient({ projectId }: { projectId: string }) {
   const [complete, setComplete] = useState(false);
   const [progress, setProgress] = useState<number | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
+  // 굽기 설정 — 초기값은 project.burnSettings (없으면 최대 속도 · 2초)
+  const [speed, setSpeed] = useState<string>(MAX_SPEED);
+  const [pregapSec, setPregapSec] = useState<number>(DEFAULT_PREGAP_SEC);
   const logEnd = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -32,7 +46,15 @@ export default function BurnClient({ projectId }: { projectId: string }) {
         return (await response.json()) as AlbumProject;
       })
       .then((data) => {
-        if (active) setProject(data);
+        if (!active) return;
+        setProject(data);
+        const saved = data.burnSettings;
+        if (saved?.speed !== undefined && BURN_SPEEDS.includes(saved.speed)) {
+          setSpeed(String(saved.speed));
+        }
+        if (saved?.pregapSec !== undefined && PREGAP_CHOICES.includes(saved.pregapSec)) {
+          setPregapSec(saved.pregapSec);
+        }
       })
       .catch((error: Error) => {
         if (active) setProjectError(error.message);
@@ -80,10 +102,14 @@ export default function BurnClient({ projectId }: { projectId: string }) {
     setProgress(null);
     setLogs([]);
     try {
+      // speed 미지정 = 드라이브 최대 속도
+      const settings: BurnSettings = { pregapSec };
+      if (speed !== MAX_SPEED) settings.speed = Number(speed);
+
       const response = await fetch("/api/burn", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ projectId }),
+        body: JSON.stringify({ projectId, settings }),
       });
       if (!response.ok) {
         const fallback =
@@ -139,7 +165,7 @@ export default function BurnClient({ projectId }: { projectId: string }) {
     } finally {
       setBurning(false);
     }
-  }, [projectId]);
+  }, [projectId, speed, pregapSec]);
 
   if (loading) return <main className="mx-auto max-w-5xl p-8 text-zinc-600">앨범을 불러오는 중…</main>;
   if (projectError || !project) {
@@ -197,6 +223,57 @@ export default function BurnClient({ projectId }: { projectId: string }) {
               모든 트랙의 추출이 완료되어야 굽기를 진행할 수 있습니다.
             </p>
           )}
+        </section>
+
+        <section className="rounded-2xl border border-zinc-200 bg-white p-5">
+          <h2 className="text-lg font-bold">굽기 설정</h2>
+          <div className="mt-4 grid gap-5 sm:grid-cols-2">
+            <div>
+              <label htmlFor="burn-speed" className="block text-sm font-semibold text-zinc-800">
+                굽기 배속
+              </label>
+              <select
+                id="burn-speed"
+                value={speed}
+                disabled={burning}
+                onChange={(event) => setSpeed(event.target.value)}
+                className="mt-2 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-500"
+              >
+                <option value={MAX_SPEED}>최대 속도 (기본)</option>
+                {BURN_SPEEDS.map((value) => (
+                  <option key={value} value={String(value)}>
+                    {value}배속
+                  </option>
+                ))}
+              </select>
+              <p className="mt-2 text-xs text-zinc-600">
+                배속이 낮을수록 굽기는 오래 걸리지만 더 안정적입니다.
+              </p>
+            </div>
+
+            <div>
+              <label htmlFor="burn-pregap" className="block text-sm font-semibold text-zinc-800">
+                트랙 간격
+              </label>
+              <select
+                id="burn-pregap"
+                value={String(pregapSec)}
+                disabled={burning}
+                onChange={(event) => setPregapSec(Number(event.target.value))}
+                className="mt-2 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-500"
+              >
+                {PREGAP_CHOICES.map((value) => (
+                  <option key={value} value={String(value)}>
+                    {value === 0 ? "0초 (끊김 없이)" : `${value}초`}
+                    {value === DEFAULT_PREGAP_SEC ? " (기본)" : ""}
+                  </option>
+                ))}
+              </select>
+              <p className="mt-2 text-xs text-zinc-600">
+                곡과 곡 사이 무음 길이입니다. 첫 곡 앞 2초는 CD 규격상 고정입니다.
+              </p>
+            </div>
+          </div>
         </section>
 
         {(burning || logs.length > 0 || complete) && (

@@ -6,6 +6,47 @@ import { rejectCrossOrigin } from "@/lib/server-guards";
 
 type Ctx = { params: Promise<{ id: string }> };
 
+export const dynamic = "force-dynamic";
+
+/** 목록/디자인에서 쓰는 이미지 확장자 */
+const LIST_EXTS = new Set([".jpg", ".jpeg", ".png", ".webp", ".gif"]);
+
+// GET /api/projects/[id]/assets → { filenames } (업로드된 사진 목록, 최신순)
+export async function GET(request: Request, { params }: Ctx) {
+  const crossOrigin = rejectCrossOrigin(request);
+  if (crossOrigin) return crossOrigin;
+
+  const { id } = await params;
+
+  const project = await getProject(id).catch(() => null);
+  if (!project) {
+    return Response.json({ error: "앨범을 찾을 수 없습니다." }, { status: 404 });
+  }
+
+  const dir = assetsDir(id);
+  let entries: string[];
+  try {
+    entries = await fs.readdir(dir);
+  } catch {
+    return Response.json({ filenames: [] }); // assets 폴더 미생성
+  }
+
+  const found: { name: string; mtime: number }[] = [];
+  for (const name of entries) {
+    if (name.startsWith(".")) continue;
+    if (!LIST_EXTS.has(path.extname(name).toLowerCase())) continue;
+    try {
+      const stat = await fs.stat(path.join(dir, name));
+      if (stat.isFile()) found.push({ name, mtime: stat.mtimeMs });
+    } catch {
+      /* 경합으로 사라진 파일 무시 */
+    }
+  }
+  found.sort((a, b) => b.mtime - a.mtime || b.name.localeCompare(a.name));
+
+  return Response.json({ filenames: found.map((f) => f.name) });
+}
+
 /** 업로드 상한 (H8) */
 const MAX_FILE_BYTES = 5 * 1024 * 1024; // 파일당 5MB
 const MAX_REQUEST_BYTES = 20 * 1024 * 1024; // 요청당 20MB

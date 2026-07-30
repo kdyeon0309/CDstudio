@@ -2,7 +2,7 @@ import { spawn } from "child_process";
 import { once } from "events";
 import { createWriteStream, promises as fs } from "fs";
 import path from "path";
-import type { AlbumProject, BurnEvent, DriveStatus, Track } from "./types";
+import type { AlbumProject, BurnEvent, BurnSettings, DriveStatus, Track } from "./types";
 import { MAX_AUDIO_MINUTES, formatDuration } from "./types";
 import { safeFilename } from "./storage";
 
@@ -19,19 +19,11 @@ export const CD_FRAME_BYTES = 2352;
 export const CD_FRAMES_PER_SEC = 75;
 /** Red Book 최대 트랙 수 */
 const CD_MAX_TRACKS = 99;
-/** 기본 트랙 간 프리갭 (초) */
-const DEFAULT_PREGAP_SEC = 2;
+/** 기본 트랙 간 프리갭 (초) — BurnSettings.pregapSec 미지정 시 */
+export const DEFAULT_PREGAP_SEC = 2;
 
 const BIN_NAME = "audio.bin";
 const CUE_NAME = "audio.cue";
-
-/** 굽기 옵션 (UI 노출 없음 — 현재는 기본값 사용) */
-export interface BurnSettings {
-  /** 2번 트랙부터 삽입할 프리갭(초). 0이면 갭 없이 이어 붙인다. 기본 2초 */
-  pregapSec?: number;
-  /** 굽기 속도 배속. 미지정 시 드라이브 기본값 */
-  speed?: number;
-}
 
 export type BurnMode = "cue" | "folder";
 
@@ -46,6 +38,15 @@ export type BurnMode = "cue" | "folder";
  */
 export function burnMode(): BurnMode {
   return process.env.CDSTUDIO_BURN_MODE === "folder" ? "folder" : "cue";
+}
+
+/** BurnSettings.pregapSec → 실제 적용 초 (미지정 시 기본 2초) */
+export function effectivePregapSec(settings?: BurnSettings): number {
+  const value = settings?.pregapSec;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    return DEFAULT_PREGAP_SEC;
+  }
+  return value;
 }
 
 function run(command: string, args: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
@@ -80,17 +81,20 @@ export async function getDriveStatus(): Promise<DriveStatus> {
   try {
     const result = await run(DRUTIL, ["status"]);
     const raw = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
-    if (result.code !== 0 || !raw || /no (optical )?drive|no device|not found/i.test(raw)) {
+    const type = field(raw, "Type");
+    // 드라이브가 있어도 drutil이 0이 아닌 코드로 끝나는 경우가 있어,
+    // Type 필드가 파싱되면 출력을 신뢰한다.
+    if (!raw || /no (optical )?drive|no device found/i.test(raw) || (result.code !== 0 && !type)) {
       return { connected: false, mediaPresent: false, blank: false, erasable: false, raw };
     }
 
-    const type = field(raw, "Type");
     const mediaPresent =
       !!type &&
       !/no media|none|unknown/i.test(type) &&
       !/no media|please insert|tray open/i.test(raw);
+    // 실제 출력 형식: "Writability: appendable, blank, overwritable"
+    const writability = field(raw, "Writability") ?? "";
     const blankValue = field(raw, "Blank");
-    const writableValue = field(raw, "Writable");
     const erasableValue = field(raw, "Erasable");
     const spaceFree = field(raw, "Space Free");
     const minuteMatch = spaceFree?.match(/(\d+(?:\.\d+)?)\s*(?:min|minute)/i);
@@ -101,16 +105,39 @@ export async function getDriveStatus(): Promise<DriveStatus> {
         ? Number(msfMatch[1]) + Number(msfMatch[2]) / 60 + Number(msfMatch[3] ?? 0) / 4500
         : undefined;
 
+    // "Vendor   Product   Rev" 헤더 다음 줄에서 벤더/제품명 추출 (없으면 undefined)
+    let vendor = field(raw, "Vendor");
+    let product = field(raw, "Product");
+    if (!vendor) {
+      const lines = raw.split("\n");
+      const header = lines.findIndex((l) => /^\s*Vendor\s+Product\s+Rev\s*$/i.test(l));
+      const value = header >= 0 ? lines[header + 1]?.trim() : undefined;
+      if (value) {
+        const parts = value.split(/\s+/);
+        if (parts.length >= 2) {
+          vendor = parts[0];
+          product = parts.slice(1, -1).join(" ") || parts[1];
+        }
+      }
+    }
+
     return {
       connected: true,
-      vendor: field(raw, "Vendor"),
-      product: field(raw, "Product"),
+      vendor,
+      product,
       mediaPresent,
-      blank: mediaPresent && (positiveValue(blankValue) || /\bblank\b/i.test(type ?? "")),
-      erasable: mediaPresent && (positiveValue(erasableValue) || /CD-RW/i.test(type ?? "")),
+      blank:
+        mediaPresent &&
+        (/\bblank\b/i.test(writability) ||
+          positiveValue(blankValue) ||
+          /\bblank\b/i.test(type ?? "")),
+      erasable:
+        mediaPresent &&
+        (/\berasable\b/i.test(writability) ||
+          positiveValue(erasableValue) ||
+          /CD-RW/i.test(type ?? "")),
       writableMinutes,
       raw,
-      ...(positiveValue(writableValue) && !mediaPresent ? { mediaPresent: true } : {}),
     };
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error);
@@ -295,6 +322,7 @@ export interface PrepareStagingOptions {
  * cue 모드(기본): 스테이징 디렉토리에 `audio.bin`(전곡 raw PCM 연결) +
  * `audio.cue`(트랙 경계·프리갭)를 만든다. 각 트랙 끝은 2352바이트(1프레임)
  * 경계까지 0으로 패딩한다 — CD 섹터 정렬 필수.
+ * 프리갭은 `settings.pregapSec`(미지정 시 2초)을 2번 트랙부터 적용한다.
  *
  * folder 모드(CDSTUDIO_BURN_MODE=folder): 기존 방식대로 `NN - 제목.wav`를
  * 하드링크(실패 시 복사)로 배치한다. 굽기 순서는 보장되지 않는다.
@@ -305,7 +333,7 @@ export async function prepareBurnStaging(
   options: PrepareStagingOptions = {},
 ): Promise<BurnStaging> {
   const mode = burnMode();
-  const pregapSec = Math.max(0, options.settings?.pregapSec ?? DEFAULT_PREGAP_SEC);
+  const pregapSec = effectivePregapSec(options.settings);
 
   await cleanupBurnStaging(stagingDirectory);
   await fs.mkdir(stagingDirectory, { recursive: true });
@@ -457,10 +485,14 @@ export async function cleanupBurnStaging(stagingDirectory: string): Promise<void
  * 총 재생 시간은 project.json의 durationSec(참고용)이 아니라
  * ffprobe로 조회한 실제 WAV duration을 합산한다.
  * (수 GB 이미지 생성 전에 호출해야 헛수고를 막을 수 있다)
+ *
+ * 79분 상한에는 **트랙 간격(프리갭)도 가산**한다. 실제 디스크 점유는
+ * 오디오 합계 + (트랙수−1)×pregapSec + 2초(1번 트랙 리드인, Red Book 고정)다.
  */
 export async function validateForBurn(
   project: AlbumProject,
   staged: StagedTrack[],
+  settings?: BurnSettings,
 ): Promise<string[]> {
   const failures: string[] = [];
 
@@ -526,9 +558,17 @@ export async function validateForBurn(
     }
   }
 
-  if (durationKnown && totalSec > MAX_AUDIO_MINUTES * 60) {
+  // 트랙 간격은 실제로 디스크를 점유한다. 1번 트랙 앞 2초 리드인은 규격상 고정이고,
+  // 설정한 간격은 2번 트랙부터 (트랙수−1)회 삽입된다.
+  const pregapSec = effectivePregapSec(settings);
+  const gapSec =
+    staged.length > 0 ? DEFAULT_PREGAP_SEC + Math.max(0, staged.length - 1) * pregapSec : 0;
+  const discSec = totalSec + gapSec;
+
+  if (durationKnown && discSec > MAX_AUDIO_MINUTES * 60) {
     failures.push(
-      `총 재생 시간이 ${MAX_AUDIO_MINUTES}분을 초과합니다. (실제 ${formatDuration(totalSec)})`,
+      `총 재생 시간이 ${MAX_AUDIO_MINUTES}분을 초과합니다. ` +
+        `(트랙 간격 포함 ${formatDuration(discSec)} — 오디오 ${formatDuration(totalSec)} + 간격 ${formatDuration(gapSec)})`,
     );
   }
 
@@ -565,21 +605,52 @@ export function checkDriveReady(status: DriveStatus): string | null {
   return null;
 }
 
+/** 굽기 배속 허용 범위 (drutil -speed) */
+const SPEED_MIN = 1;
+const SPEED_MAX = 48;
+/** 트랙 간격 허용 범위 (초, drutil -pregap) */
+const PREGAP_MIN = 0;
+const PREGAP_MAX = 10;
+
+function intInRange(value: unknown, min: number, max: number): number | undefined {
+  if (typeof value !== "number" || !Number.isInteger(value)) return undefined;
+  if (value < min || value > max) return undefined;
+  return value;
+}
+
 /**
- * drutil burn 인자 배열.
+ * BurnSettings → drutil 인자 배열.
  *
- * cue 모드에서는 `-audio`/`-pregap`을 쓰지 않는다 — 트랙 경계와 갭이 모두
- * CUE 안에 명시돼 있고, drutil은 `.cue/bin`을 이미지로 인식해 그대로 굽는다.
- * 경로는 항상 마지막 인자.
+ * 값은 반드시 정수·범위 검증 후 String(n)으로 인자 배열에 넣는다 (셸 조합 금지).
+ *
+ * drutil 인자 형식 실측(2026-07-31, macOS 26.5 / drutil 내장):
+ *  - `-speed <N>`  : 값 인자를 받는다. man drutil 예시 `burn -noverify -eject -speed 24 ~/Documents`.
+ *  - `-pregap <S>` : **폴더(-audio) 굽기 전용**. 값 인자를 받으며 단위는 초.
+ *    `drutil size -audio -pregap N <dir>`의 블록 수(75블록=1초)로 확인:
+ *    미지정 1800 / 0→1650 / 1→1725 / 2→1800 / 3→1875 / 4→1950 / 5→2025.
+ *    즉 기본값은 2초이고, 1번 트랙 앞 2초 리드인은 규격상 고정이라 값은 2번 트랙부터 적용된다.
+ *    6초 이상을 주면 오류 없이 조용히 기본값(2초)으로 되돌아간다 (man: "Invalid commands are ignored").
+ *
+ * cue 모드에서는 `-audio`·`-pregap`을 쓰지 않는다 — 트랙 경계와 갭이 모두 CUE 안에
+ * 명시돼 있고(PREGAP 줄), drutil은 `.cue/bin`을 이미지로 인식해 그대로 굽는다.
  */
 export function burnArgs(staging: BurnStaging, settings?: BurnSettings): string[] {
-  const args = ["burn", "-noverify", "-eject"];
-  if (staging.mode === "folder") args.push("-audio");
-  if (settings?.speed && Number.isFinite(settings.speed) && settings.speed > 0) {
-    args.push("-speed", String(settings.speed));
+  const options: string[] = [];
+
+  const speed = intInRange(settings?.speed, SPEED_MIN, SPEED_MAX);
+  if (speed !== undefined) options.push("-speed", String(speed));
+
+  // 폴더 굽기에서만 drutil이 갭을 삽입한다. cue 모드는 CUE의 PREGAP이 담당.
+  const folderOptions: string[] = [];
+  if (staging.mode === "folder") {
+    folderOptions.push("-audio");
+    const pregapSec = intInRange(settings?.pregapSec, PREGAP_MIN, PREGAP_MAX);
+    if (pregapSec !== undefined) options.push("-pregap", String(pregapSec));
   }
-  args.push(staging.targetPath);
-  return args;
+
+  // drutil 문법: burn (burn-options) <path> — 경로는 반드시 마지막.
+  // 경로 뒤에 옵션을 두면 usage 도움말과 함께 종료 코드 1로 실패한다 (실드라이브에서 확인).
+  return ["burn", ...folderOptions, "-noverify", "-eject", ...options, staging.targetPath];
 }
 
 /**

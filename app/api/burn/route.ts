@@ -11,12 +11,46 @@ import {
 } from "@/lib/burn";
 import { acquireJobLock, rejectCrossOrigin, releaseJobLock } from "@/lib/server-guards";
 import { getProject, projectDir, tracksDir, updateProjectWith } from "@/lib/storage";
-import type { BurnEvent } from "@/lib/types";
+import type { BurnEvent, BurnSettings } from "@/lib/types";
 
 export const runtime = "nodejs";
 
 function sse(event: BurnEvent): Uint8Array {
   return new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`);
+}
+
+/** 클라이언트가 보낸 굽기 설정을 서버에서 재검증한다 (PATCH와 동일 범위). */
+function parseBurnSettings(
+  raw: unknown,
+): { ok: true; settings?: BurnSettings } | { ok: false; error: string } {
+  if (raw === undefined || raw === null) return { ok: true };
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    return { ok: false, error: "settings는 객체여야 합니다." };
+  }
+
+  const { speed, pregapSec } = raw as { speed?: unknown; pregapSec?: unknown };
+  const settings: BurnSettings = {};
+
+  if (speed !== undefined && speed !== null) {
+    if (typeof speed !== "number" || !Number.isInteger(speed) || speed < 1 || speed > 48) {
+      return { ok: false, error: "speed는 1~48 사이의 정수여야 합니다." };
+    }
+    settings.speed = speed;
+  }
+
+  if (pregapSec !== undefined && pregapSec !== null) {
+    if (
+      typeof pregapSec !== "number" ||
+      !Number.isInteger(pregapSec) ||
+      pregapSec < 0 ||
+      pregapSec > 5 // drutil은 6초 이상을 조용히 기본 2초로 되돌린다
+    ) {
+      return { ok: false, error: "pregapSec는 0~5 사이의 정수여야 합니다." };
+    }
+    settings.pregapSec = pregapSec;
+  }
+
+  return { ok: true, settings };
 }
 
 export async function POST(request: Request) {
@@ -25,12 +59,17 @@ export async function POST(request: Request) {
   if (crossOrigin) return crossOrigin;
 
   let projectId: string;
+  let requestedSettings: BurnSettings | undefined;
   try {
-    const body = (await request.json()) as { projectId?: unknown };
+    const body = (await request.json()) as { projectId?: unknown; settings?: unknown };
     if (typeof body.projectId !== "string" || !body.projectId) {
       return Response.json({ error: "projectId가 필요합니다." }, { status: 400 });
     }
     projectId = body.projectId;
+
+    const parsed = parseBurnSettings(body.settings);
+    if (!parsed.ok) return Response.json({ error: parsed.error }, { status: 400 });
+    requestedSettings = parsed.settings;
   } catch {
     return Response.json({ error: "올바른 JSON 요청이 아닙니다." }, { status: 400 });
   }
@@ -85,6 +124,18 @@ export async function POST(request: Request) {
         return;
       }
 
+      // 요청에 settings가 오면 검증된 값을 쓰고 다음 굽기 기본값으로 저장한다.
+      // 없으면 프로젝트에 저장된 설정을 그대로 사용한다.
+      let settings = project.burnSettings;
+      if (requestedSettings) {
+        settings = requestedSettings;
+        // 저장 실패는 굽기를 막지 않는다 (설정 기억만 못 할 뿐).
+        await updateProjectWith(projectId, (current) => ({
+          ...current,
+          burnSettings: requestedSettings,
+        })).catch(() => null);
+      }
+
       // B3: 클라이언트 모달만 믿지 않고 서버에서 드라이브 상태를 재확인한다.
       send({ type: "validating", message: "드라이브 상태를 확인하고 있습니다." });
       const driveProblem = checkDriveReady(await getDriveStatus());
@@ -97,10 +148,10 @@ export async function POST(request: Request) {
       send({ type: "validating", message: "굽기 목록을 확인하고 있습니다." });
       const staged = await resolveBurnTracks(project, tracksDir(projectId));
 
-      // H2: 원본 WAV 기준으로 규격·총 재생 시간을 검증한다.
+      // H2: 원본 WAV 기준으로 규격·총 재생 시간(트랙 간격 포함)을 검증한다.
       //     수 GB 이미지를 만들기 전에 검증해야 헛수고를 막을 수 있다.
       send({ type: "validating", message: "WAV 규격과 총 재생 시간을 확인하고 있습니다." });
-      const failures = await validateForBurn(project, staged);
+      const failures = await validateForBurn(project, staged, settings);
       if (failures.length > 0) {
         send({ type: "error", message: failures.join("\n") });
         return;
@@ -110,6 +161,7 @@ export async function POST(request: Request) {
       //     CUE/BIN 이미지를 만들어 순서를 명시적으로 통제한다.
       send({ type: "validating", message: "굽기 이미지를 만들고 있습니다." });
       const staging = await prepareBurnStaging(staged, stagingDirectory, {
+        settings,
         onTrack: (done, total, title) => {
           send({ type: "log", message: `이미지 생성 중 (${done}/${total}) ${title}` });
         },
@@ -120,10 +172,14 @@ export async function POST(request: Request) {
       }
 
       let succeeded = false;
-      await burn(staging, (event) => {
-        if (event.type === "done") succeeded = true;
-        else send(event);
-      });
+      await burn(
+        staging,
+        (event) => {
+          if (event.type === "done") succeeded = true;
+          else send(event);
+        },
+        settings,
+      );
 
       if (!succeeded) return;
 

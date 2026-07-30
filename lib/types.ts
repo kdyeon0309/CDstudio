@@ -14,8 +14,11 @@
  *  POST   /api/extract/probe       → body: { url } → ProbeResult  (곡/플레이리스트 메타 조회, 다운로드 안 함)
  *  POST   /api/extract             → body: { projectId, items: ProbeItem[] } → SSE text/event-stream (ExtractEvent)
  *
- *  POST   /api/design              → body: { projectId } → SSE (DesignEvent) — 3안 생성
+ *  POST   /api/design              → body: { projectId } → SSE (DesignEvent) — 3안 생성 (partModes 반영)
  *  POST   /api/design/refine       → body: { projectId, variant, feedback } → SSE (DesignEvent)
+ *  POST   /api/design/part         → body: { projectId, variant, part } → SSE (DesignEvent) — 영역 재생성
+ *  DELETE /api/design/part         → body: { projectId, variant, part } → { variant } — 영역 삭제
+ *  DELETE /api/design/variant      → body: { projectId, variant } → { artwork } — 안 삭제
  *
  *  GET    /api/drive               → DriveStatus
  *  POST   /api/burn                → body: { projectId } → SSE (BurnEvent)
@@ -23,6 +26,7 @@
  *  파일 서빙:
  *  GET    /api/projects/[id]/file?type=track&name=...    → 오디오 파일 (미리듣기용)
  *  GET    /api/projects/[id]/file?type=artwork&name=...  → 아트워크 HTML/이미지
+ *  GET    /api/projects/[id]/assets                      → { filenames: string[] } 업로드된 사진 목록
  *  POST   /api/projects/[id]/assets                      → multipart 사진 업로드 → { filename }
  */
 
@@ -45,8 +49,22 @@ export interface AlbumProject {
   updatedAt: string;
   tracks: Track[]; // order 오름차순 유지
   artwork: ArtworkState;
+  burnSettings?: BurnSettings;
   burnedAt?: string;
 }
+
+/** 굽기 설정 (프로젝트에 저장, 굽기 요청 시 사용) */
+export interface BurnSettings {
+  /** 굽기 배속 (drutil -speed). 미지정 = 드라이브 최대 속도 */
+  speed?: number;
+  /** 트랙 사이 간격(초, drutil -pregap, 유효 0~5 — 6 이상은 drutil이 기본 2초로 무시). 미지정 = 기본 2초 */
+  pregapSec?: number;
+}
+
+/** UI에서 제공하는 배속 선택지 (낮을수록 안정적) */
+export const BURN_SPEEDS: readonly number[] = [4, 8, 16, 24];
+/** 트랙 간격 선택지 (초) */
+export const PREGAP_CHOICES: readonly number[] = [0, 1, 2, 3];
 
 export interface Track {
   id: string; // uuid
@@ -98,20 +116,66 @@ export type ExtractEvent =
 
 // ── 아트워크 ──────────────────────────────────────────────────
 
+/**
+ * 인쇄물 5영역 (주얼케이스 기준)
+ *  front       앞표지 (북릿 겉면)
+ *  front-inner 앞표지 내부 (북릿 안쪽면)
+ *  label       CD 라벨
+ *  back        뒷표지 (트레이카드 겉면, 스파인 포함)
+ *  back-inner  뒷표지 내부 (트레이카드 안쪽면)
+ */
+export type ArtworkPart = "front" | "front-inner" | "label" | "back" | "back-inner";
+
+export const ARTWORK_PARTS: readonly ArtworkPart[] = [
+  "front",
+  "front-inner",
+  "label",
+  "back",
+  "back-inner",
+];
+
+/** 영역 한국어 이름 (UI 공용) */
+export const PART_LABELS: Record<ArtworkPart, string> = {
+  front: "앞표지",
+  "front-inner": "앞표지 내부",
+  label: "CD 라벨",
+  back: "뒷표지",
+  "back-inner": "뒷표지 내부",
+};
+
+/**
+ * 영역별 제작 방식
+ *  ai        AI(codex)가 HTML 디자인 생성
+ *  photo     업로드 사진 풀블리드 (partPhotos 의 파일 사용)
+ *  template  단색 배경 + 앨범명/아티스트/트랙리스트 기본 템플릿 (서버가 로컬 생성)
+ *  blank     비움 — 파일 없음, 인쇄에서 제외
+ */
+export type PartMode = "ai" | "photo" | "template" | "blank";
+
+export const DEFAULT_PART_MODES: Record<ArtworkPart, PartMode> = {
+  front: "ai",
+  "front-inner": "ai",
+  label: "ai",
+  back: "ai",
+  "back-inner": "ai",
+};
+
 export interface ArtworkState {
   /** 생성된 안 (1~3). 파일은 artwork/variant-{n}-{part}.html */
   variants: ArtworkVariant[];
   /** 선택된 안 번호 (1-based). 인쇄는 이 안을 사용 */
   selected?: number;
+  /** 영역별 제작 방식. 없으면 전 영역 "ai" */
+  partModes?: Record<ArtworkPart, PartMode>;
+  /** photo 모드 영역에 쓸 assets/ 파일명 */
+  partPhotos?: Partial<Record<ArtworkPart, string>>;
 }
-
-export type ArtworkPart = "front" | "back" | "label";
 
 export interface ArtworkVariant {
   index: number; // 1..3
-  name: string; // Claude가 붙인 컨셉명 (예: "미드나잇 네온")
-  /** part → artwork/ 내 HTML 파일명 */
-  files: Record<ArtworkPart, string>;
+  name: string; // AI가 붙인 컨셉명 (예: "미드나잇 네온")
+  /** part → artwork/ 내 HTML 파일명. blank·삭제된 영역은 키 없음 */
+  files: Partial<Record<ArtworkPart, string>>;
 }
 
 /** POST /api/design SSE 이벤트 */
@@ -126,7 +190,9 @@ export type DesignEvent =
  */
 export const PRINT_SPECS = {
   front: { widthMm: 120, heightMm: 120 },
+  "front-inner": { widthMm: 120, heightMm: 120 },
   back: { widthMm: 150, heightMm: 118, spineMm: 6.5 }, // 양쪽 스파인 포함 150
+  "back-inner": { widthMm: 150, heightMm: 118, spineMm: 6.5 },
   label: { outerDiameterMm: 116, innerDiameterMm: 23 },
 } as const;
 

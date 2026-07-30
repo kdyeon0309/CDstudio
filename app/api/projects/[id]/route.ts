@@ -7,9 +7,12 @@ import type {
   ArtworkPart,
   ArtworkState,
   ArtworkVariant,
+  BurnSettings,
+  PartMode,
   Track,
   TrackStatus,
 } from "@/lib/types";
+import { ARTWORK_PARTS, DEFAULT_PART_MODES } from "@/lib/types";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -23,6 +26,7 @@ const PATCHABLE = [
   "status",
   "tracks",
   "artwork",
+  "burnSettings",
   "burnedAt",
 ] as const;
 type PatchableKey = (typeof PATCHABLE)[number];
@@ -41,7 +45,7 @@ const TRACK_STATUSES: readonly TrackStatus[] = [
   "done",
   "error",
 ];
-const ARTWORK_PARTS: readonly ArtworkPart[] = ["front", "back", "label"];
+const PART_MODES: readonly PartMode[] = ["ai", "photo", "template", "blank"];
 
 const MAX_TRACKS = 200;
 const MAX_TEXT = 500;
@@ -134,9 +138,11 @@ function validateVariant(value: unknown, idx: number): ArtworkVariant {
   if (typeof index !== "number" || !Number.isInteger(index) || index < 1) {
     fail(`artwork.variants[${idx}].index 는 1 이상의 정수여야 합니다.`);
   }
+  // files 는 Partial — 있는 영역만 검증한다 (blank/삭제된 영역은 키 없음)
   const files = asRecord(o.files, `artwork.variants[${idx}].files`);
-  const parsed = {} as Record<ArtworkPart, string>;
+  const parsed: Partial<Record<ArtworkPart, string>> = {};
   for (const part of ARTWORK_PARTS) {
+    if (files[part] === undefined) continue;
     parsed[part] = asFilename(files[part], `artwork.variants[${idx}].files.${part}`);
   }
   return {
@@ -144,6 +150,31 @@ function validateVariant(value: unknown, idx: number): ArtworkVariant {
     name: asString(o.name, `artwork.variants[${idx}].name`),
     files: parsed,
   };
+}
+
+function validatePartModes(value: unknown): Record<ArtworkPart, PartMode> | undefined {
+  const o = asRecord(value, "artwork.partModes");
+  const modes = {} as Record<ArtworkPart, PartMode>;
+  for (const part of ARTWORK_PARTS) {
+    const mode = o[part];
+    if (mode === undefined) continue;
+    if (typeof mode !== "string" || !PART_MODES.includes(mode as PartMode)) {
+      fail(`artwork.partModes.${part} 값이 올바르지 않습니다.`);
+    }
+    modes[part] = mode as PartMode;
+  }
+  return Object.keys(modes).length > 0 ? modes : undefined;
+}
+
+function validatePartPhotos(value: unknown): Partial<Record<ArtworkPart, string>> | undefined {
+  const o = asRecord(value, "artwork.partPhotos");
+  const photos: Partial<Record<ArtworkPart, string>> = {};
+  for (const part of ARTWORK_PARTS) {
+    const name = o[part];
+    if (name === undefined || name === null || name === "") continue;
+    photos[part] = asFilename(name, `artwork.partPhotos.${part}`);
+  }
+  return Object.keys(photos).length > 0 ? photos : undefined;
 }
 
 function validateArtwork(value: unknown): ArtworkState {
@@ -164,6 +195,14 @@ function validateArtwork(value: unknown): ArtworkState {
       fail("artwork.selected 는 존재하는 안(variant) 번호여야 합니다.");
     }
     artwork.selected = selected;
+  }
+  if (o.partModes !== undefined && o.partModes !== null) {
+    const modes = validatePartModes(o.partModes);
+    if (modes) artwork.partModes = { ...DEFAULT_PART_MODES, ...modes };
+  }
+  if (o.partPhotos !== undefined && o.partPhotos !== null) {
+    const photos = validatePartPhotos(o.partPhotos);
+    if (photos) artwork.partPhotos = photos;
   }
   return artwork;
 }
@@ -198,6 +237,34 @@ function validatePatch(body: Record<string, unknown>): ValidPatch {
       case "artwork":
         patch.artwork = validateArtwork(value);
         break;
+      case "burnSettings": {
+        const o = asRecord(value, "burnSettings");
+        const settings: BurnSettings = {};
+        if (o.speed !== undefined && o.speed !== null) {
+          if (
+            typeof o.speed !== "number" ||
+            !Number.isInteger(o.speed) ||
+            o.speed < 1 ||
+            o.speed > 48
+          ) {
+            fail("burnSettings.speed 는 1~48 사이 정수여야 합니다.");
+          }
+          settings.speed = o.speed;
+        }
+        if (o.pregapSec !== undefined && o.pregapSec !== null) {
+          if (
+            typeof o.pregapSec !== "number" ||
+            !Number.isFinite(o.pregapSec) ||
+            o.pregapSec < 0 ||
+            o.pregapSec > 5
+          ) {
+            fail("burnSettings.pregapSec 는 0~5초 사이여야 합니다.");
+          }
+          settings.pregapSec = o.pregapSec;
+        }
+        patch.burnSettings = settings;
+        break;
+      }
       case "burnedAt":
         if (value === null) break; // 무시
         patch.burnedAt = asString(value, "burnedAt", 40);
