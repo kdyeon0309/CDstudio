@@ -739,8 +739,12 @@ export default function DesignClient({ projectId }: { projectId: string }) {
             disabled={running}
             className="w-full rounded-xl bg-amber px-4 py-3 text-sm font-semibold text-ink transition hover:bg-amber-bright disabled:cursor-not-allowed disabled:opacity-40"
           >
-            {busy === "generate" ? "생성 중…" : "3안 생성"}
+            {busy === "generate" ? "생성 중…" : "디자인 생성"}
           </button>
+          <p className="text-[11px] leading-4 text-fg-dim">
+            이미 만들어진 안은 지우지 않고 비어 있는 안만 생성합니다. 다시 만들려면 해당 안을
+            삭제 후 생성하세요. AI 영역이 없는 구성(전부 사진/템플릿)은 1안만 만듭니다.
+          </p>
           {running && (
             <button
               type="button"
@@ -796,7 +800,7 @@ export default function DesignClient({ projectId }: { projectId: string }) {
         {variants.length === 0 ? (
           <p className="rounded-xl border border-dashed border-line px-6 py-16 text-center text-sm text-fg-dim">
             아직 생성된 안이 없습니다. 왼쪽에서 컨셉과 영역별 제작 방식을 정하고
-            &ldquo;3안 생성&rdquo;을 누르세요.
+            &ldquo;디자인 생성&rdquo;을 누르세요.
           </p>
         ) : (
           VARIANT_SLOTS.map((index) => {

@@ -35,7 +35,9 @@ export async function POST(request: NextRequest) {
   const projectId = readProjectId(body);
   if (!projectId) return badRequest("projectId 가 필요합니다");
 
-  const regenerate = body.regenerate === "missing" ? "missing" : "all";
+  // 기본 동작은 "missing" — 이미 만들어진 안은 절대 덮어쓰지 않는다.
+  // 전체 재생성은 명시적으로 regenerate: "all" 을 보낸 경우에만.
+  const regenerate = body.regenerate === "all" ? "all" : "missing";
 
   const project = await loadProject(projectId);
   if (!project) return badRequest("앨범을 찾을 수 없습니다", 404);
@@ -49,7 +51,12 @@ export async function POST(request: NextRequest) {
     (part) => modes[part] === "photo" && !project.artwork?.partPhotos?.[part],
   );
 
-  const allIndexes = Array.from({ length: MAX_VARIANTS }, (_, i) => i + 1);
+  // AI 영역이 하나도 없으면(전부 사진/템플릿/비움) 결과가 결정적이라
+  // 3안이 전부 동일해진다 — 1안만 만든다.
+  const hasAiPart = ARTWORK_PARTS.some((part) => modes[part] === "ai");
+  const maxVariants = hasAiPart ? MAX_VARIANTS : 1;
+
+  const allIndexes = Array.from({ length: maxVariants }, (_, i) => i + 1);
   const filled = new Set(
     (project.artwork?.variants ?? [])
       .filter((v) => Object.keys(v.files ?? {}).length > 0)
@@ -62,12 +69,23 @@ export async function POST(request: NextRequest) {
 
   return designSseResponse(request, lock, async ({ send, signal }) => {
     if (indexes.length === 0) {
-      send({ type: "status", message: "비어 있는 안이 없습니다." });
+      send({
+        type: "status",
+        message: hasAiPart
+          ? "비어 있는 안이 없습니다. 다시 만들려면 안을 삭제한 뒤 생성하세요."
+          : "이미 만들어진 안이 있습니다. AI 영역이 없는 구성은 항상 같은 결과라 1안이면 충분합니다.",
+      });
       const fresh = await getProject(projectId);
       send({ type: "done", artwork: fresh?.artwork ?? { variants: [] } });
       return;
     }
 
+    if (!hasAiPart) {
+      send({
+        type: "status",
+        message: "AI 영역이 없는 구성(사진/템플릿)이라 1안만 생성합니다.",
+      });
+    }
     send({
       type: "status",
       message:
