@@ -10,6 +10,7 @@ import type {
   BurnSettings,
   PartMode,
   PartTransform,
+  PhotoFit,
   Track,
   TrackStatus,
 } from "@/lib/types";
@@ -191,6 +192,22 @@ function validatePartTransforms(
   return Object.keys(transforms).length > 0 ? transforms : undefined;
 }
 
+function validatePartPhotoFits(
+  value: unknown,
+): Partial<Record<ArtworkPart, PhotoFit>> | undefined {
+  const o = asRecord(value, "artwork.partPhotoFits");
+  const fits: Partial<Record<ArtworkPart, PhotoFit>> = {};
+  for (const part of ARTWORK_PARTS) {
+    const fit = o[part];
+    if (fit === undefined || fit === null) continue;
+    if (fit !== "cover" && fit !== "contain") {
+      fail(`artwork.partPhotoFits.${part} 값이 올바르지 않습니다.`);
+    }
+    fits[part] = fit;
+  }
+  return Object.keys(fits).length > 0 ? fits : undefined;
+}
+
 function validatePartPhotos(value: unknown): Partial<Record<ArtworkPart, string>> | undefined {
   const o = asRecord(value, "artwork.partPhotos");
   const photos: Partial<Record<ArtworkPart, string>> = {};
@@ -228,6 +245,10 @@ function validateArtwork(value: unknown): ArtworkState {
   if (o.partPhotos !== undefined && o.partPhotos !== null) {
     const photos = validatePartPhotos(o.partPhotos);
     if (photos) artwork.partPhotos = photos;
+  }
+  if (o.partPhotoFits !== undefined && o.partPhotoFits !== null) {
+    const fits = validatePartPhotoFits(o.partPhotoFits);
+    if (fits) artwork.partPhotoFits = fits;
   }
   if (o.partTransforms !== undefined && o.partTransforms !== null) {
     const transforms = validatePartTransforms(o.partTransforms);

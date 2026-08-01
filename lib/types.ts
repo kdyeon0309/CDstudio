@@ -169,9 +169,18 @@ export interface ArtworkState {
   partModes?: Record<ArtworkPart, PartMode>;
   /** photo 모드 영역에 쓸 assets/ 파일명 */
   partPhotos?: Partial<Record<ArtworkPart, string>>;
+  /** photo 모드 배치 방식. 기본 "cover" */
+  partPhotoFits?: Partial<Record<ArtworkPart, PhotoFit>>;
   /** 인쇄 미세조정 (인쇄 미리보기에서 편집, 화면·인쇄 공통 적용) */
   partTransforms?: Partial<Record<ArtworkPart, PartTransform>>;
 }
+
+/**
+ * photo 모드 사진 배치
+ *  cover   비율 유지 + 영역 꽉 채움 (넘치는 가장자리 잘림)
+ *  contain 사진 전체 보임 (여백은 같은 사진을 흐리게 확대해 채움)
+ */
+export type PhotoFit = "cover" | "contain";
 
 /** 영역 콘텐츠의 인쇄 미세조정 — 이동(mm)·확대축소 */
 export interface PartTransform {
