@@ -11,6 +11,23 @@
   justify-content: center;
 }
 
+/** 화면: 조정 컨트롤 + A4 시트를 묶는 카드. 인쇄: 시트만 남는다 */
+.sheetBlock {
+  display: grid;
+  justify-items: center;
+  gap: 0.75rem;
+}
+
+.controlBar {
+  box-sizing: border-box;
+  width: var(--a4-width);
+  max-width: 100%;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--color-line, #3f3f46);
+  border-radius: 0.75rem;
+  background: var(--color-panel, #18181b);
+}
+
 .sheet {
   position: relative;
   display: flex;
@@ -35,7 +52,8 @@
   font-weight: 700;
 }
 
-.sheet:last-child {
+/* 인쇄되는 마지막 시트 — 뒤에 빈 페이지가 생기지 않게 */
+.lastBlock .sheet {
   break-after: auto;
   page-break-after: auto;
 }
@@ -60,6 +78,21 @@
   color: #71717a;
   font-size: 0.875rem;
   font-weight: 600;
+}
+
+/**
+ * 실치수 박스 안쪽 클리핑 레이어.
+ * iframe 에 mm transform 을 걸어 위치·크기를 미세조정하므로 넘치는 부분은 잘라낸다.
+ * (재단 마크·접는선은 이 레이어 밖에 있어 잘리지 않는다)
+ */
+.artworkClip {
+  position: absolute;
+  overflow: hidden;
+  inset: 0;
+}
+
+.labelClip {
+  border-radius: 50%;
 }
 
 .artworkFrame {
@@ -181,13 +214,6 @@
   border-radius: 50%;
 }
 
-.labelArtwork {
-  width: 100%;
-  height: 100%;
-  overflow: hidden;
-  border-radius: 50%;
-}
-
 .labelHole {
   position: absolute;
   z-index: 4;
@@ -232,7 +258,8 @@
     display: none !important;
   }
 
-  .emptySheet {
+  .emptySheet,
+  .emptyBlock {
     display: none !important;
   }
 
@@ -243,10 +270,12 @@
   }
 
   .printRoot,
-  .preview {
+  .preview,
+  .sheetBlock {
     display: block;
     margin: 0;
     padding: 0;
+    gap: 0;
   }
 
   .sheet {
