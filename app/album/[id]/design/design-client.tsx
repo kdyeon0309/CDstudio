@@ -134,6 +134,7 @@ export default function DesignClient({ projectId }: { projectId: string }) {
   const [assets, setAssets] = useState<string[]>([]);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [deletingAsset, setDeletingAsset] = useState<string | null>(null);
 
   const [busy, setBusy] = useState<Busy>(null);
   const [refiningIndex, setRefiningIndex] = useState<number | null>(null);
@@ -148,6 +149,7 @@ export default function DesignClient({ projectId }: { projectId: string }) {
   const [rev, setRev] = useState<Record<string, number>>({});
 
   const abortRef = useRef<AbortController | null>(null);
+  const deletingAssetRef = useRef(false);
   const logEndRef = useRef<HTMLDivElement>(null);
   /** 제작 방식 PATCH 직렬화 (연타 시 경합 방지) */
   const saveChainRef = useRef<Promise<boolean>>(Promise.resolve(true));
@@ -317,6 +319,63 @@ export default function DesignClient({ projectId }: { projectId: string }) {
     } finally {
       setUploading(false);
     }
+  }
+
+  function handleDeleteAsset(filename: string) {
+    if (
+      deletingAssetRef.current ||
+      !window.confirm("사진을 삭제할까요? 이 사진을 쓰는 영역은 지정 해제됩니다.")
+    ) {
+      return;
+    }
+    deletingAssetRef.current = true;
+    setDeletingAsset(filename);
+    setUploadError(null);
+
+    const run = async (): Promise<boolean> => {
+      try {
+        const res = await fetch(
+          `/api/projects/${encodeURIComponent(projectId)}/assets`,
+          {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ filename }),
+          },
+        );
+        const data = (await res.json().catch(() => null)) as
+          | { ok?: boolean; removedParts?: ArtworkPart[]; error?: string }
+          | null;
+        if (!res.ok || !data?.ok) {
+          throw new Error(data?.error ?? `사진 삭제 실패 (${res.status})`);
+        }
+
+        const removedParts = Array.isArray(data.removedParts) ? data.removedParts : [];
+        setAssets((cur) => cur.filter((name) => name !== filename));
+        setPartPhotos((cur) => {
+          const next = { ...cur };
+          for (const part of removedParts) delete next[part];
+          return next;
+        });
+        setProject((cur) => {
+          if (!cur) return cur;
+          const nextPhotos = { ...(cur.artwork.partPhotos ?? {}) };
+          for (const part of removedParts) delete nextPhotos[part];
+          return { ...cur, artwork: { ...cur.artwork, partPhotos: nextPhotos } };
+        });
+        return true;
+      } catch (err) {
+        setUploadError(
+          err instanceof Error ? err.message : "사진을 삭제하지 못했습니다.",
+        );
+        return false;
+      } finally {
+        deletingAssetRef.current = false;
+        setDeletingAsset(null);
+      }
+    };
+
+    const next = saveChainRef.current.then(run, run);
+    saveChainRef.current = next;
   }
 
   // ── SSE 이벤트 ────────────────────────────────────────────
@@ -630,13 +689,26 @@ export default function DesignClient({ projectId }: { projectId: string }) {
           {assets.length > 0 && (
             <ul className="mt-3 grid grid-cols-3 gap-2">
               {assets.map((name) => (
-                <li key={name} className="overflow-hidden rounded-lg border border-line">
+                <li
+                  key={name}
+                  className="group relative overflow-hidden rounded-lg border border-line"
+                >
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img
                     src={fileUrl(projectId, "asset", name)}
                     alt={name}
                     className="h-16 w-full object-cover"
                   />
+                  <button
+                    type="button"
+                    aria-label={`${name} 삭제`}
+                    title="사진 삭제"
+                    disabled={deletingAsset !== null}
+                    onClick={() => handleDeleteAsset(name)}
+                    className="absolute right-1 top-1 flex h-6 w-6 items-center justify-center rounded-full bg-ink/80 text-sm text-white opacity-0 shadow transition hover:bg-rose group-hover:opacity-100 focus:opacity-100 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    ×
+                  </button>
                 </li>
               ))}
             </ul>
@@ -663,7 +735,7 @@ export default function DesignClient({ projectId }: { projectId: string }) {
                         key={opt.mode}
                         type="button"
                         aria-pressed={active}
-                        disabled={running}
+                        disabled={running || deletingAsset !== null}
                         onClick={() => changeMode(part, opt.mode)}
                         className={`rounded-md border px-2 py-1.5 text-[11px] transition disabled:opacity-40 ${
                           active
@@ -681,7 +753,7 @@ export default function DesignClient({ projectId }: { projectId: string }) {
                   <div className="mt-3">
                     {assets.length === 0 ? (
                       <p className="text-[11px] text-amber">
-                        위에서 사진을 먼저 업로드하세요.
+                        사진을 다시 지정하세요. 위에서 사진을 먼저 업로드할 수 있습니다.
                       </p>
                     ) : (
                       <>
@@ -690,10 +762,10 @@ export default function DesignClient({ projectId }: { projectId: string }) {
                           {assets.map((name) => {
                             const picked = partPhotos[part] === name;
                             return (
-                              <li key={name}>
+                              <li key={name} className="group relative">
                                 <button
                                   type="button"
-                                  disabled={running}
+                                  disabled={running || deletingAsset !== null}
                                   aria-pressed={picked}
                                   onClick={() => changePhoto(part, name)}
                                   title={name}
@@ -710,13 +782,23 @@ export default function DesignClient({ projectId }: { projectId: string }) {
                                     className="h-12 w-full object-cover"
                                   />
                                 </button>
+                                <button
+                                  type="button"
+                                  aria-label={`${name} 삭제`}
+                                  title="사진 삭제"
+                                  disabled={deletingAsset !== null}
+                                  onClick={() => handleDeleteAsset(name)}
+                                  className="absolute right-0.5 top-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-ink/80 text-xs text-white opacity-0 shadow transition hover:bg-rose group-hover:opacity-100 focus:opacity-100 disabled:cursor-not-allowed disabled:opacity-40"
+                                >
+                                  ×
+                                </button>
                               </li>
                             );
                           })}
                         </ul>
                         {!partPhotos[part] && (
                           <p className="mt-1.5 text-[11px] text-amber">
-                            사진이 지정되지 않았습니다.
+                            사진을 다시 지정하세요.
                           </p>
                         )}
                       </>

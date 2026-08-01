@@ -1,8 +1,9 @@
 import { promises as fs } from "fs";
 import path from "path";
 import { randomUUID } from "crypto";
-import { assetsDir, getProject, safeFilename } from "@/lib/storage";
+import { assetsDir, getProject, safeFilename, updateProjectWith } from "@/lib/storage";
 import { rejectCrossOrigin } from "@/lib/server-guards";
+import { ARTWORK_PARTS, type ArtworkPart } from "@/lib/types";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -45,6 +46,66 @@ export async function GET(request: Request, { params }: Ctx) {
   found.sort((a, b) => b.mtime - a.mtime || b.name.localeCompare(a.name));
 
   return Response.json({ filenames: found.map((f) => f.name) });
+}
+
+// DELETE /api/projects/[id]/assets  { filename } → { ok, removedParts }
+export async function DELETE(request: Request, { params }: Ctx) {
+  const crossOrigin = rejectCrossOrigin(request);
+  if (crossOrigin) return crossOrigin;
+
+  const { id } = await params;
+  const project = await getProject(id).catch(() => null);
+  if (!project) {
+    return Response.json({ error: "앨범을 찾을 수 없습니다." }, { status: 404 });
+  }
+
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return Response.json({ error: "올바른 JSON 요청이 아닙니다." }, { status: 400 });
+  }
+
+  const filename =
+    typeof body === "object" && body !== null && "filename" in body
+      ? body.filename
+      : undefined;
+  if (
+    typeof filename !== "string" ||
+    filename.length === 0 ||
+    filename === "." ||
+    filename === ".." ||
+    filename.includes("\0") ||
+    path.basename(filename) !== filename ||
+    !LIST_EXTS.has(path.extname(filename).toLowerCase())
+  ) {
+    return Response.json({ error: "올바른 이미지 파일명이 아닙니다." }, { status: 400 });
+  }
+
+  try {
+    await fs.unlink(path.join(assetsDir(id), filename));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return Response.json({ error: "사진을 찾을 수 없습니다." }, { status: 404 });
+    }
+    return Response.json({ error: "사진을 삭제하지 못했습니다." }, { status: 500 });
+  }
+
+  let removedParts: ArtworkPart[] = [];
+  const updated = await updateProjectWith(id, (latest) => {
+    const partPhotos = { ...(latest.artwork.partPhotos ?? {}) };
+    removedParts = ARTWORK_PARTS.filter((part) => partPhotos[part] === filename);
+    for (const part of removedParts) delete partPhotos[part];
+    return {
+      ...latest,
+      artwork: { ...latest.artwork, partPhotos },
+    };
+  });
+
+  if (!updated) {
+    return Response.json({ error: "앨범을 찾을 수 없습니다." }, { status: 404 });
+  }
+  return Response.json({ ok: true, removedParts });
 }
 
 /** 업로드 상한 (H8) */
