@@ -827,6 +827,7 @@ ${body}
 function photoHtml(project: AlbumProject, part: ArtworkPart, dataUri: string): string {
   const title = `${project.title} — ${PART_LABELS[part]}`;
   const alt = esc(project.title);
+  const fit = project.artwork?.partPhotoFits?.[part] === "contain" ? "contain" : "cover";
 
   if (part === "label") {
     const { outerDiameterMm, innerDiameterMm } = PRINT_SPECS.label;
@@ -839,14 +840,20 @@ function photoHtml(project: AlbumProject, part: ArtworkPart, dataUri: string): s
   border-radius: 50%; overflow: hidden; background: #000000;
 }
 .disc img { width: 100%; height: 100%; object-fit: cover; display: block; }
+${fit === "contain" ? `.disc img { position: absolute; inset: 0; }
+.disc .photo-bg { filter: blur(8mm) brightness(0.55); transform: scale(1.15); }
+.disc .photo-fg { object-fit: contain; }` : ""}
 .hole {
   position: absolute; left: 50%; top: 50%;
   width: ${innerDiameterMm}mm; height: ${innerDiameterMm}mm;
   margin: -${half}mm 0 0 -${half}mm;
   border-radius: 50%; background: #ffffff;
 }`;
+    const images = fit === "contain"
+      ? `<img class="photo-bg" src="${dataUri}" alt=""><img class="photo-fg" src="${dataUri}" alt="${alt}">`
+      : `<img src="${dataUri}" alt="${alt}">`;
     const body = `<div class="canvas">
-  <div class="disc"><img src="${dataUri}" alt="${alt}"></div>
+  <div class="disc">${images}</div>
   <div class="hole"></div>
 </div>`;
     return docShell(part, title, css, body);
@@ -854,8 +861,14 @@ function photoHtml(project: AlbumProject, part: ArtworkPart, dataUri: string): s
 
   const css = `
 .canvas { background: #000000; }
-.canvas img { width: 100%; height: 100%; object-fit: cover; display: block; }`;
-  const body = `<div class="canvas"><img src="${dataUri}" alt="${alt}"></div>`;
+.canvas img { width: 100%; height: 100%; object-fit: cover; display: block; }
+${fit === "contain" ? `.canvas img { position: absolute; inset: 0; }
+.canvas .photo-bg { filter: blur(8mm) brightness(0.55); transform: scale(1.15); }
+.canvas .photo-fg { object-fit: contain; }` : ""}`;
+  const images = fit === "contain"
+    ? `<img class="photo-bg" src="${dataUri}" alt=""><img class="photo-fg" src="${dataUri}" alt="${alt}">`
+    : `<img src="${dataUri}" alt="${alt}">`;
+  const body = `<div class="canvas">${images}</div>`;
   return docShell(part, title, css, body);
 }
 

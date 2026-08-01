@@ -9,6 +9,7 @@ import type {
   ArtworkVariant,
   DesignEvent,
   PartMode,
+  PhotoFit,
 } from "@/lib/types";
 import {
   ARTWORK_PARTS,
@@ -72,6 +73,7 @@ const MODE_LABELS: Record<PartMode, string> = {
 
 type PartModes = Record<ArtworkPart, PartMode>;
 type PartPhotos = Partial<Record<ArtworkPart, string>>;
+type PartPhotoFits = Partial<Record<ArtworkPart, PhotoFit>>;
 
 /** 저장된 partModes 를 기본값으로 채워 전 영역이 채워진 맵으로 만든다 */
 function readModes(artwork: ArtworkState | undefined): PartModes {
@@ -128,6 +130,7 @@ export default function DesignClient({ projectId }: { projectId: string }) {
 
   const [partModes, setPartModes] = useState<PartModes>({ ...DEFAULT_PART_MODES });
   const [partPhotos, setPartPhotos] = useState<PartPhotos>({});
+  const [partPhotoFits, setPartPhotoFits] = useState<PartPhotoFits>({});
   const [partsError, setPartsError] = useState<string | null>(null);
   const [partsSaved, setPartsSaved] = useState(false);
 
@@ -171,6 +174,7 @@ export default function DesignClient({ projectId }: { projectId: string }) {
             partsInitRef.current = true;
             setPartModes(readModes(data.artwork));
             setPartPhotos({ ...(data.artwork?.partPhotos ?? {}) });
+            setPartPhotoFits({ ...(data.artwork?.partPhotoFits ?? {}) });
           }
           setLoadError(null);
         })
@@ -235,7 +239,7 @@ export default function DesignClient({ projectId }: { projectId: string }) {
   // ── 제작 방식 저장 ────────────────────────────────────────
   /** 최신 project 를 다시 읽어 artwork 의 다른 필드를 보존한 채 병합 PATCH */
   const persistParts = useCallback(
-    (modes: PartModes, photos: PartPhotos): Promise<boolean> => {
+    (modes: PartModes, photos: PartPhotos, fits: PartPhotoFits): Promise<boolean> => {
       const run = async (): Promise<boolean> => {
         try {
           const latestRes = await fetch(
@@ -250,6 +254,7 @@ export default function DesignClient({ projectId }: { projectId: string }) {
             ...(latest.artwork ?? { variants: [] }),
             partModes: modes,
             partPhotos: photos,
+            partPhotoFits: fits,
           };
           const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}`, {
             method: "PATCH",
@@ -283,7 +288,7 @@ export default function DesignClient({ projectId }: { projectId: string }) {
   function changeMode(part: ArtworkPart, mode: PartMode) {
     const nextModes: PartModes = { ...partModes, [part]: mode };
     setPartModes(nextModes);
-    void persistParts(nextModes, partPhotos);
+    void persistParts(nextModes, partPhotos, partPhotoFits);
   }
 
   function changePhoto(part: ArtworkPart, filename: string) {
@@ -291,7 +296,13 @@ export default function DesignClient({ projectId }: { projectId: string }) {
     if (nextPhotos[part] === filename) delete nextPhotos[part];
     else nextPhotos[part] = filename;
     setPartPhotos(nextPhotos);
-    void persistParts(partModes, nextPhotos);
+    void persistParts(partModes, nextPhotos, partPhotoFits);
+  }
+
+  function changePhotoFit(part: ArtworkPart, fit: PhotoFit) {
+    const nextFits: PartPhotoFits = { ...partPhotoFits, [part]: fit };
+    setPartPhotoFits(nextFits);
+    void persistParts(partModes, partPhotos, nextFits);
   }
 
   // ── 사진 업로드 ───────────────────────────────────────────
@@ -465,7 +476,7 @@ export default function DesignClient({ projectId }: { projectId: string }) {
     try {
       // 서버가 project.concept / artwork.partModes 를 읽으므로 먼저 저장한다
       if (!(await saveConcept())) return;
-      if (!(await persistParts(partModes, partPhotos))) {
+      if (!(await persistParts(partModes, partPhotos, partPhotoFits))) {
         setRunError("제작 방식을 저장하지 못해 생성을 중단했습니다.");
         return;
       }
@@ -800,6 +811,38 @@ export default function DesignClient({ projectId }: { projectId: string }) {
                           <p className="mt-1.5 text-[11px] text-amber">
                             사진을 다시 지정하세요.
                           </p>
+                        )}
+                        {partPhotos[part] && (
+                          <div className="mt-3">
+                            <p className="text-[11px] text-fg-dim">사진 배치 방식</p>
+                            <div className="mt-1.5 grid grid-cols-2 gap-1.5">
+                              {([
+                                ["cover", "꽉 채움 (잘림)"],
+                                ["contain", "전체 보임 (여백 흐림)"],
+                              ] as const).map(([fit, label]) => {
+                                const active = (partPhotoFits[part] ?? "cover") === fit;
+                                return (
+                                  <button
+                                    key={fit}
+                                    type="button"
+                                    aria-pressed={active}
+                                    disabled={running || deletingAsset !== null}
+                                    onClick={() => changePhotoFit(part, fit)}
+                                    className={`rounded-md border px-2 py-1.5 text-[10px] transition disabled:opacity-40 ${
+                                      active
+                                        ? "border-amber/70 bg-amber/15 text-amber-bright"
+                                        : "border-line text-fg-muted hover:bg-panel-2 hover:text-fg"
+                                    }`}
+                                  >
+                                    {label}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                            <p className="mt-1.5 text-[10px] text-fg-dim">
+                              배치 방식 변경은 다음 생성/영역 재생성부터 적용됩니다.
+                            </p>
+                          </div>
                         )}
                       </>
                     )}
