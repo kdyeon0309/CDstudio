@@ -169,6 +169,18 @@ export interface ArtworkState {
   partModes?: Record<ArtworkPart, PartMode>;
   /** photo 모드 영역에 쓸 assets/ 파일명 */
   partPhotos?: Partial<Record<ArtworkPart, string>>;
+  /** 인쇄 미세조정 (인쇄 미리보기에서 편집, 화면·인쇄 공통 적용) */
+  partTransforms?: Partial<Record<ArtworkPart, PartTransform>>;
+}
+
+/** 영역 콘텐츠의 인쇄 미세조정 — 이동(mm)·확대축소 */
+export interface PartTransform {
+  /** 오른쪽으로 이동(mm), 음수 = 왼쪽. 범위 -60~60 */
+  offsetXMm: number;
+  /** 아래로 이동(mm), 음수 = 위. 범위 -60~60 */
+  offsetYMm: number;
+  /** 확대 배율, 1 = 원본. 범위 0.5~3 */
+  scale: number;
 }
 
 export interface ArtworkVariant {

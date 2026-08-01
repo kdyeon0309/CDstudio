@@ -9,6 +9,7 @@ import type {
   ArtworkVariant,
   BurnSettings,
   PartMode,
+  PartTransform,
   Track,
   TrackStatus,
 } from "@/lib/types";
@@ -166,6 +167,30 @@ function validatePartModes(value: unknown): Record<ArtworkPart, PartMode> | unde
   return Object.keys(modes).length > 0 ? modes : undefined;
 }
 
+function validatePartTransforms(
+  value: unknown,
+): Partial<Record<ArtworkPart, PartTransform>> | undefined {
+  const o = asRecord(value, "artwork.partTransforms");
+  const transforms: Partial<Record<ArtworkPart, PartTransform>> = {};
+  for (const part of ARTWORK_PARTS) {
+    const raw = o[part];
+    if (raw === undefined || raw === null) continue;
+    const t = asRecord(raw, `artwork.partTransforms.${part}`);
+    const num = (v: unknown, name: string, min: number, max: number): number => {
+      if (typeof v !== "number" || !Number.isFinite(v) || v < min || v > max) {
+        fail(`artwork.partTransforms.${part}.${name} 은 ${min}~${max} 사이 숫자여야 합니다.`);
+      }
+      return v;
+    };
+    transforms[part] = {
+      offsetXMm: num(t.offsetXMm ?? 0, "offsetXMm", -60, 60),
+      offsetYMm: num(t.offsetYMm ?? 0, "offsetYMm", -60, 60),
+      scale: num(t.scale ?? 1, "scale", 0.5, 3),
+    };
+  }
+  return Object.keys(transforms).length > 0 ? transforms : undefined;
+}
+
 function validatePartPhotos(value: unknown): Partial<Record<ArtworkPart, string>> | undefined {
   const o = asRecord(value, "artwork.partPhotos");
   const photos: Partial<Record<ArtworkPart, string>> = {};
@@ -203,6 +228,10 @@ function validateArtwork(value: unknown): ArtworkState {
   if (o.partPhotos !== undefined && o.partPhotos !== null) {
     const photos = validatePartPhotos(o.partPhotos);
     if (photos) artwork.partPhotos = photos;
+  }
+  if (o.partTransforms !== undefined && o.partTransforms !== null) {
+    const transforms = validatePartTransforms(o.partTransforms);
+    if (transforms) artwork.partTransforms = transforms;
   }
   return artwork;
 }
