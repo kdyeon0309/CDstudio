@@ -2,11 +2,67 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AlbumProject, ArtworkPart, DesignEvent } from "@/lib/types";
+import type {
+  AlbumProject,
+  ArtworkPart,
+  ArtworkState,
+  ArtworkVariant,
+  DesignEvent,
+} from "@/lib/types";
 import { ARTWORK_PARTS, PART_LABELS, PRINT_SPECS } from "@/lib/types";
 import { readDesignStream } from "../design/read-design-stream";
 
 type ImagePrompts = Partial<Record<ArtworkPart, string>>;
+
+type ApplyPhase = "uploading" | "applying" | "done" | "error" | "notice";
+
+interface ApplyStatus {
+  phase: ApplyPhase;
+  message: string;
+  variant?: number;
+  filename?: string;
+  revision?: number;
+}
+
+type ApplyStatuses = Partial<Record<ArtworkPart, ApplyStatus>>;
+
+const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
+const PX_PER_MM = 96 / 25.4;
+const PREVIEW_SCALE = 0.3;
+
+const PREVIEW_SIZE: Record<ArtworkPart, { widthMm: number; heightMm: number }> = {
+  front: {
+    widthMm: PRINT_SPECS.front.widthMm,
+    heightMm: PRINT_SPECS.front.heightMm,
+  },
+  "front-inner": {
+    widthMm: PRINT_SPECS["front-inner"].widthMm,
+    heightMm: PRINT_SPECS["front-inner"].heightMm,
+  },
+  label: {
+    widthMm: PRINT_SPECS.label.outerDiameterMm,
+    heightMm: PRINT_SPECS.label.outerDiameterMm,
+  },
+  back: {
+    widthMm: PRINT_SPECS.back.widthMm,
+    heightMm: PRINT_SPECS.back.heightMm,
+  },
+  "back-inner": {
+    widthMm: PRINT_SPECS["back-inner"].widthMm,
+    heightMm: PRINT_SPECS["back-inner"].heightMm,
+  },
+};
+
+const projectUrl = (projectId: string) =>
+  `/api/projects/${encodeURIComponent(projectId)}`;
+
+const artworkFileUrl = (projectId: string, filename: string) =>
+  `${projectUrl(projectId)}/file?type=artwork&name=${encodeURIComponent(filename)}`;
+
+async function responseError(response: Response, fallback: string): Promise<string> {
+  const data = (await response.json().catch(() => null)) as { error?: string } | null;
+  return data?.error ?? `${fallback} (${response.status})`;
+}
 
 /** 영역별 비율 안내 (서버 프롬프트 규칙과 동일한 기준) */
 const ASPECT_NOTE: Record<ArtworkPart, string> = {
@@ -29,10 +85,14 @@ export default function PromptsClient({ projectId }: { projectId: string }) {
   const [selectedParts, setSelectedParts] = useState<ArtworkPart[]>([...ARTWORK_PARTS]);
   const [feeling, setFeeling] = useState("");
   const [latestGeneratedParts, setLatestGeneratedParts] = useState<ArtworkPart[] | null>(null);
+  const [applyStatuses, setApplyStatuses] = useState<ApplyStatuses>({});
+  const [applyingPart, setApplyingPart] = useState<ArtworkPart | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   const copiedTimerRef = useRef<number | null>(null);
   const requestedPartsRef = useRef<ArtworkPart[]>([]);
+  const applyBusyRef = useRef(false);
+  const applyAbortRef = useRef<AbortController | null>(null);
 
   const loadProject = useCallback(
     () =>
@@ -57,6 +117,7 @@ export default function PromptsClient({ projectId }: { projectId: string }) {
   useEffect(
     () => () => {
       abortRef.current?.abort();
+      applyAbortRef.current?.abort();
       if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current);
     },
     [],
@@ -134,6 +195,154 @@ export default function PromptsClient({ projectId }: { projectId: string }) {
       copiedTimerRef.current = window.setTimeout(() => setCopied(null), 1800);
     } catch {
       setCopyError("클립보드에 복사하지 못했습니다. 본문을 직접 선택해 복사하세요.");
+    }
+  }
+
+  function setApplyStatus(part: ArtworkPart, status: ApplyStatus) {
+    setApplyStatuses((current) => ({ ...current, [part]: status }));
+  }
+
+  async function handleApplyImage(part: ArtworkPart, file: File) {
+    if (applyBusyRef.current) return;
+    if (file.size > MAX_UPLOAD_BYTES) {
+      setApplyStatus(part, {
+        phase: "error",
+        message: "파일은 5MB 이하만 올릴 수 있습니다.",
+      });
+      return;
+    }
+
+    applyBusyRef.current = true;
+    setApplyingPart(part);
+    setApplyStatus(part, { phase: "uploading", message: "업로드 중…" });
+    const controller = new AbortController();
+    applyAbortRef.current = controller;
+    let stage: "upload" | "save" | "apply" = "upload";
+
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const uploadResponse = await fetch(`${projectUrl(projectId)}/assets`, {
+        method: "POST",
+        body: form,
+        signal: controller.signal,
+      });
+      const uploadData = (await uploadResponse.json().catch(() => null)) as
+        | { filename?: string; error?: string }
+        | null;
+      if (!uploadResponse.ok || !uploadData?.filename) {
+        throw new Error(uploadData?.error ?? `요청 실패 (${uploadResponse.status})`);
+      }
+
+      stage = "save";
+      setApplyStatus(part, { phase: "applying", message: "적용 중…" });
+      const latestResponse = await fetch(projectUrl(projectId), {
+        cache: "no-store",
+        signal: controller.signal,
+      });
+      if (!latestResponse.ok) {
+        throw new Error(await responseError(latestResponse, "앨범 불러오기 실패"));
+      }
+      const latest = (await latestResponse.json()) as AlbumProject;
+      const artwork: ArtworkState = {
+        ...(latest.artwork ?? { variants: [] }),
+        partModes: {
+          ...(latest.artwork?.partModes ?? {}),
+          [part]: "photo",
+        } as ArtworkState["partModes"],
+        partPhotos: {
+          ...(latest.artwork?.partPhotos ?? {}),
+          [part]: uploadData.filename,
+        },
+      };
+      const saveResponse = await fetch(projectUrl(projectId), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ artwork }),
+        signal: controller.signal,
+      });
+      if (!saveResponse.ok) {
+        throw new Error(await responseError(saveResponse, "설정 저장 실패"));
+      }
+      const savedProject = (await saveResponse.json()) as AlbumProject;
+      setProject(savedProject);
+
+      const targetVariant = savedProject.artwork.selected
+        ? savedProject.artwork.variants.find(
+            (variant) => variant.index === savedProject.artwork.selected,
+          )
+        : savedProject.artwork.variants[0];
+      if (!targetVariant) {
+        setApplyStatus(part, {
+          phase: "notice",
+          message: "먼저 디자인 화면에서 안을 한 번 생성하세요",
+        });
+        return;
+      }
+
+      stage = "apply";
+      const applyResponse = await fetch("/api/design/part", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectId,
+          variant: targetVariant.index,
+          part,
+        }),
+        signal: controller.signal,
+      });
+      if (!applyResponse.ok) {
+        if (applyResponse.status === 409) {
+          throw new Error("디자인 작업이 끝난 뒤 다시 시도하세요");
+        }
+        throw new Error(await responseError(applyResponse, "영역 적용 실패"));
+      }
+
+      const streamResult: {
+        artwork?: ArtworkState;
+        variant?: ArtworkVariant;
+        error?: string;
+      } = {};
+      await readDesignStream(applyResponse, (event: DesignEvent) => {
+        if (event.type === "variant-done") streamResult.variant = event.variant;
+        if (event.type === "done") streamResult.artwork = event.artwork;
+        if (event.type === "error") streamResult.error = event.message;
+      });
+      if (streamResult.error) throw new Error(streamResult.error);
+      if (!streamResult.artwork) throw new Error("완료 응답을 받지 못했습니다.");
+
+      const completedFile =
+        streamResult.variant?.files[part] ??
+        streamResult.artwork.variants.find(
+          (variant) => variant.index === targetVariant.index,
+        )
+          ?.files[part];
+      if (!completedFile) throw new Error("적용된 영역 파일을 찾지 못했습니다.");
+
+      setProject({ ...savedProject, artwork: streamResult.artwork });
+      setApplyStatus(part, {
+        phase: "done",
+        message: `적용 완료 ✓ (${targetVariant.index}안 ${PART_LABELS[part]})`,
+        variant: targetVariant.index,
+        filename: completedFile,
+        revision: Date.now(),
+      });
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      const detail = error instanceof Error ? error.message : String(error);
+      const message =
+        detail === "디자인 작업이 끝난 뒤 다시 시도하세요"
+          ? detail
+          : stage === "upload"
+            ? `업로드 실패: ${detail}`
+            : stage === "save"
+              ? `사진 설정 저장 실패: ${detail}`
+              : `적용 실패: ${detail}`;
+      setApplyStatus(part, { phase: "error", message });
+    } finally {
+      applyAbortRef.current = null;
+      applyBusyRef.current = false;
+      setApplyingPart(null);
     }
   }
 
@@ -297,6 +506,11 @@ export default function PromptsClient({ projectId }: { projectId: string }) {
             const text = prompts[part] as string;
             const isPrevious =
               latestGeneratedParts === null || !latestGeneratedParts.includes(part);
+            const applyStatus = applyStatuses[part];
+            const isThisPartApplying = applyingPart === part;
+            const preview = PREVIEW_SIZE[part];
+            const previewWidth = preview.widthMm * PX_PER_MM;
+            const previewHeight = preview.heightMm * PX_PER_MM;
             return (
               <article
                 key={part}
@@ -329,6 +543,73 @@ export default function PromptsClient({ projectId }: { projectId: string }) {
                 <p className="mt-3 flex-1 select-text whitespace-pre-wrap rounded-lg border border-line/70 bg-ink/50 px-3 py-2.5 text-[13px] leading-6 text-fg">
                   {text}
                 </p>
+                <div className="mt-3 border-t border-line/70 pt-3">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <label
+                      className={`inline-flex items-center rounded-lg border border-teal/50 px-3 py-1.5 text-xs text-teal transition ${
+                        applyingPart
+                          ? "cursor-not-allowed opacity-40"
+                          : "cursor-pointer hover:bg-teal/10"
+                      }`}
+                    >
+                      <input
+                        type="file"
+                        accept="image/jpeg,image/png,image/webp"
+                        disabled={applyingPart !== null}
+                        aria-label={`${PART_LABELS[part]} 이미지 올려서 적용`}
+                        className="sr-only"
+                        onChange={(event) => {
+                          const file = event.currentTarget.files?.[0];
+                          event.currentTarget.value = "";
+                          if (file) void handleApplyImage(part, file);
+                        }}
+                      />
+                      {isThisPartApplying ? applyStatus?.message : "이미지 올려서 바로 적용"}
+                    </label>
+                    {applyStatus && !isThisPartApplying && (
+                      <p
+                        className={`text-xs ${
+                          applyStatus.phase === "done"
+                            ? "text-teal"
+                            : applyStatus.phase === "notice"
+                              ? "text-amber"
+                              : "text-rose"
+                        }`}
+                        role={applyStatus.phase === "error" ? "alert" : "status"}
+                      >
+                        {applyStatus.message}
+                      </p>
+                    )}
+                  </div>
+
+                  {applyStatus?.phase === "done" && applyStatus.filename && (
+                    <figure className="mt-3 space-y-1.5">
+                      <div
+                        className="overflow-hidden rounded-lg border border-line bg-white"
+                        style={{
+                          width: previewWidth * PREVIEW_SCALE,
+                          height: previewHeight * PREVIEW_SCALE,
+                        }}
+                      >
+                        <iframe
+                          key={`${applyStatus.filename}-${applyStatus.revision}`}
+                          src={`${artworkFileUrl(projectId, applyStatus.filename)}&v=${applyStatus.revision}`}
+                          title={`${applyStatus.variant}안 ${PART_LABELS[part]} 적용 미리보기`}
+                          sandbox=""
+                          scrolling="no"
+                          style={{
+                            width: previewWidth,
+                            height: previewHeight,
+                            border: 0,
+                            transform: `scale(${PREVIEW_SCALE})`,
+                            transformOrigin: "top left",
+                            pointerEvents: "none",
+                          }}
+                        />
+                      </div>
+                    </figure>
+                  )}
+                </div>
               </article>
             );
           })}
@@ -342,8 +623,7 @@ export default function PromptsClient({ projectId }: { projectId: string }) {
       )}
 
       <section className="rounded-xl border border-teal/30 bg-teal/5 p-4 text-sm text-fg-muted">
-        복사한 프롬프트를 ChatGPT에 붙여넣어 이미지를 만들고, 디자인 화면에서 업로드 →
-        해당 영역을 &lsquo;내 사진&rsquo;으로 지정하세요.
+        복사 → ChatGPT에서 생성 → 여기서 바로 업로드하면 해당 표지에 적용됩니다.
         <div className="mt-3">
           <Link
             href={designHref}
