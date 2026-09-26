@@ -1498,9 +1498,14 @@ const IMAGE_PART_ROLE: Record<ArtworkPart, string> = {
   "back-inner": "트레이 카드 안쪽면. CD 트레이 밑에 비쳐 보이는 면. 시원한 이미지·패턴 중심.",
 };
 
-export function buildImagePromptsPrompt(project: AlbumProject): string {
+export function buildImagePromptsPrompt(
+  project: AlbumProject,
+  parts: readonly ArtworkPart[] = ARTWORK_PARTS,
+  feeling?: string,
+): string {
   const concept = project.concept?.trim();
-  const partBlocks = ARTWORK_PARTS.map((part) => {
+  const desiredFeeling = feeling?.trim();
+  const partBlocks = parts.map((part) => {
     const extra = partPromptOf(project, part);
     return [
       `### ${PART_LABELS[part]} (${part})`,
@@ -1513,13 +1518,16 @@ export function buildImagePromptsPrompt(project: AlbumProject): string {
   }).join("\n\n");
 
   const lines = [
-    "너는 음반 아트워크 아트 디렉터다. 개인 소장용 부틀렉 CD 의 인쇄물 5영역에 쓸 배경 이미지를,",
+    `너는 음반 아트워크 아트 디렉터다. 개인 소장용 부틀렉 CD 의 인쇄물 ${parts.length}개 영역에 쓸 배경 이미지를,`,
     "사용자가 ChatGPT(이미지 생성)에 그대로 붙여넣을 수 있는 프롬프트로 써 준다.",
     "",
     "## 앨범 정보",
     `- 앨범명: ${project.title}`,
     `- 아티스트: ${project.artist}`,
     `- 전체 컨셉: ${concept || "(지정 없음 — 트랙 분위기에서 자유롭게 해석)"}`,
+    ...(desiredFeeling
+      ? [`- 사용자가 원하는 느낌 (최우선 반영): ${desiredFeeling}`]
+      : []),
     `- 트랙 수: ${project.tracks.length}`,
     "",
     "### 트랙리스트 (분위기 참고용 — 제목 글자를 그림에 넣지 말 것)",
@@ -1529,13 +1537,16 @@ export function buildImagePromptsPrompt(project: AlbumProject): string {
     "1. 한국어로 쓴다. 사용자가 ChatGPT 에 한국어로 붙여넣는다.",
     "2. 각 프롬프트는 그 자체로 완결되어야 한다 (다른 영역을 참조하지 말 것). 3~8문장 정도.",
     "3. 주제·장면, 색 팔레트, 조명, 질감/화풍(사진·일러스트·회화 등), 구도를 구체적으로 묘사한다.",
-    "4. 5영역이 한 시리즈로 보이도록 색·화풍·모티프를 공유하되, 영역마다 구도는 다르게 한다.",
-    '5. 비율을 반드시 명시한다 — 앞표지·앞표지 내부·CD 라벨은 "정사각형(1:1)", 뒷표지·뒷표지 내부는 "가로형".',
-    '6. "CD 목업·케이스·디스크·손·프레임 없이, 인쇄용 배경 아트워크만" 이라는 조건을 반드시 넣는다.',
-    '7. "글자·텍스트·로고 넣지 말 것" 을 반드시 넣는다 (글자는 앱이 나중에 얹는다).',
-    '8. 뒷표지·뒷표지 내부에는 "중요한 요소는 중앙에 (좌우 가장자리는 접히는 옆면)" 을 넣는다.',
-    '9. CD 라벨에는 "중요한 요소는 중앙에 (원형으로 잘림)" 을 넣는다.',
-    "10. 실존 인물의 얼굴·상표·저작권 캐릭터를 그리라고 요구하지 않는다.",
+    ...(desiredFeeling
+      ? ["4. 사용자가 원하는 느낌을 전체 컨셉과 다른 참고 정보보다 우선하여 모든 요청 영역에 반영한다."]
+      : []),
+    `${desiredFeeling ? "5" : "4"}. 요청된 영역들이 한 시리즈로 보이도록 색·화풍·모티프를 공유하되, 영역마다 구도는 다르게 한다.`,
+    `${desiredFeeling ? "6" : "5"}. 비율을 반드시 명시한다 — 앞표지·앞표지 내부·CD 라벨은 "정사각형(1:1)", 뒷표지·뒷표지 내부는 "가로형".`,
+    `${desiredFeeling ? "7" : "6"}. "CD 목업·케이스·디스크·손·프레임 없이, 인쇄용 배경 아트워크만" 이라는 조건을 반드시 넣는다.`,
+    `${desiredFeeling ? "8" : "7"}. "글자·텍스트·로고 넣지 말 것" 을 반드시 넣는다 (글자는 앱이 나중에 얹는다).`,
+    `${desiredFeeling ? "9" : "8"}. 뒷표지·뒷표지 내부에는 "중요한 요소는 중앙에 (좌우 가장자리는 접히는 옆면)" 을 넣는다.`,
+    `${desiredFeeling ? "10" : "9"}. CD 라벨에는 "중요한 요소는 중앙에 (원형으로 잘림)" 을 넣는다.`,
+    `${desiredFeeling ? "11" : "10"}. 실존 인물의 얼굴·상표·저작권 캐릭터를 그리라고 요구하지 않는다.`,
     "",
     "## 영역별 정보",
     partBlocks,
@@ -1546,7 +1557,7 @@ export function buildImagePromptsPrompt(project: AlbumProject): string {
     "설명·머리말·꼬리말·마크다운 코드펜스(```)·제목을 쓰지 말 것.",
     "파일을 직접 만들거나 셸 명령을 실행하지 말 것 — 결과는 오직 아래 텍스트 형식으로만 답한다.",
     "",
-    ...ARTWORK_PARTS.flatMap((part) => [
+    ...parts.flatMap((part) => [
       `###${PART_MARKER[part]}###`,
       `(${PART_LABELS[part]} ChatGPT 이미지 생성 프롬프트)`,
     ]),
@@ -1567,11 +1578,14 @@ export function finalizeImagePrompt(part: ArtworkPart, body: string): string {
 }
 
 /** codex 출력 → 영역별 프롬프트. 한 영역이라도 없으면 DesignError */
-export function parseImagePromptsOutput(raw: string): Record<ArtworkPart, string> {
-  const sliceFor = markerSlicer(raw, ARTWORK_PARTS);
-  const out = {} as Record<ArtworkPart, string>;
+export function parseImagePromptsOutput(
+  raw: string,
+  parts: readonly ArtworkPart[] = ARTWORK_PARTS,
+): Partial<Record<ArtworkPart, string>> {
+  const sliceFor = markerSlicer(raw, parts);
+  const out: Partial<Record<ArtworkPart, string>> = {};
   const missing: ArtworkPart[] = [];
-  for (const part of ARTWORK_PARTS) {
+  for (const part of parts) {
     const block = sliceFor(part);
     const body = block === null ? "" : stripFences(block);
     if (body.length < 20) {
@@ -1591,23 +1605,26 @@ export function parseImagePromptsOutput(raw: string): Record<ArtworkPart, string
 export interface ImagePromptsOptions {
   onStatus?: StatusFn;
   signal?: AbortSignal;
+  parts?: readonly ArtworkPart[];
+  feeling?: string;
 }
 
-/** 5영역 ChatGPT 이미지 프롬프트를 AI CLI 1회 호출로 만든다 (저장은 호출자 몫) */
+/** 요청 영역의 ChatGPT 이미지 프롬프트를 AI CLI 1회 호출로 만든다 (저장은 호출자 몫) */
 export async function generateImagePrompts(
   project: AlbumProject,
   opts: ImagePromptsOptions = {},
-): Promise<Record<ArtworkPart, string>> {
+): Promise<Partial<Record<ArtworkPart, string>>> {
+  const parts = opts.parts?.length ? [...new Set(opts.parts)] : [...ARTWORK_PARTS];
   const cwd = artworkDir(project.id);
   await fs.mkdir(cwd, { recursive: true });
   opts.onStatus?.(
     `이미지 프롬프트 작성 중… (${ENGINE_LABEL[currentEngine()]} 호출, 1~2분 걸릴 수 있습니다)`,
   );
-  const raw = await runEngine(buildImagePromptsPrompt(project), {
+  const raw = await runEngine(buildImagePromptsPrompt(project, parts, opts.feeling), {
     cwd,
     timeoutMs: IMAGE_PROMPT_TIMEOUT_MS,
     ...(opts.signal ? { signal: opts.signal } : {}),
   });
   opts.onStatus?.("응답을 정리하는 중…");
-  return parseImagePromptsOutput(raw);
+  return parseImagePromptsOutput(raw, parts);
 }

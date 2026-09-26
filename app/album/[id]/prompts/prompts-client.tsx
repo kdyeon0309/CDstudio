@@ -26,9 +26,13 @@ export default function PromptsClient({ projectId }: { projectId: string }) {
   const [runError, setRunError] = useState<string | null>(null);
   const [copied, setCopied] = useState<ArtworkPart | null>(null);
   const [copyError, setCopyError] = useState<string | null>(null);
+  const [selectedParts, setSelectedParts] = useState<ArtworkPart[]>([...ARTWORK_PARTS]);
+  const [feeling, setFeeling] = useState("");
+  const [latestGeneratedParts, setLatestGeneratedParts] = useState<ArtworkPart[] | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   const copiedTimerRef = useRef<number | null>(null);
+  const requestedPartsRef = useRef<ArtworkPart[]>([]);
 
   const loadProject = useCallback(
     () =>
@@ -66,6 +70,7 @@ export default function PromptsClient({ projectId }: { projectId: string }) {
       case "done":
         setPrompts({ ...(event.artwork.imagePrompts ?? {}) });
         setProject((cur) => (cur ? { ...cur, artwork: event.artwork } : cur));
+        setLatestGeneratedParts(requestedPartsRef.current);
         setLogs((cur) => [...cur, "완료"]);
         break;
       case "error":
@@ -77,7 +82,9 @@ export default function PromptsClient({ projectId }: { projectId: string }) {
   }, []);
 
   async function handleGenerate() {
-    if (running) return;
+    if (running || selectedParts.length === 0) return;
+    const requestedParts = [...selectedParts];
+    requestedPartsRef.current = requestedParts;
     setRunning(true);
     setRunError(null);
     setLogs([]);
@@ -87,7 +94,7 @@ export default function PromptsClient({ projectId }: { projectId: string }) {
       const res = await fetch("/api/design/prompts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ projectId }),
+        body: JSON.stringify({ projectId, parts: requestedParts, feeling }),
         signal: controller.signal,
       });
       if (!res.ok) {
@@ -105,6 +112,15 @@ export default function PromptsClient({ projectId }: { projectId: string }) {
       abortRef.current = null;
       setRunning(false);
     }
+  }
+
+  function togglePart(part: ArtworkPart) {
+    if (running) return;
+    setSelectedParts((current) =>
+      current.includes(part)
+        ? current.filter((selected) => selected !== part)
+        : ARTWORK_PARTS.filter((candidate) => candidate === part || current.includes(candidate)),
+    );
   }
 
   async function handleCopy(part: ArtworkPart) {
@@ -133,33 +149,89 @@ export default function PromptsClient({ projectId }: { projectId: string }) {
   }
 
   const hasPrompts = ARTWORK_PARTS.some((part) => prompts[part]);
+  const visibleParts = ARTWORK_PARTS.filter((part) => prompts[part]);
+  const hasSelection = selectedParts.length > 0;
   const concept = project.concept?.trim();
   const designHref = `/album/${encodeURIComponent(projectId)}/design`;
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div className="min-w-0">
-          <Link
-            href={designHref}
-            className="inline-flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-[0.18em] text-fg-dim transition hover:text-fg-muted"
-          >
-            ← 디자인 화면으로
-          </Link>
-          <h2 className="mt-1 text-lg font-semibold tracking-tight text-fg">이미지 프롬프트</h2>
-          <p className="mt-1 max-w-2xl text-sm text-fg-muted">
-            앨범 정보와 컨셉으로 5개 영역 각각의 ChatGPT 이미지 생성 프롬프트를 만듭니다.
-            글자는 앱이 나중에 얹으므로 프롬프트는 배경 그림만 요청합니다.
+      <div className="min-w-0">
+        <Link
+          href={designHref}
+          className="inline-flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-[0.18em] text-fg-dim transition hover:text-fg-muted"
+        >
+          ← 디자인 화면으로
+        </Link>
+        <h2 className="mt-1 text-lg font-semibold tracking-tight text-fg">이미지 프롬프트</h2>
+        <p className="mt-1 max-w-2xl text-sm text-fg-muted">
+          만들 영역과 원하는 느낌을 고르면 ChatGPT 이미지 생성 프롬프트를 만듭니다. 글자는
+          앱이 나중에 얹으므로 프롬프트는 배경 그림만 요청합니다.
+        </p>
+      </div>
+
+      <section className="space-y-5 rounded-xl border border-line bg-panel/60 p-5">
+        <fieldset disabled={running}>
+          <legend className="text-sm font-semibold text-fg">1. 영역 선택</legend>
+          <p className="mt-1 text-xs text-fg-dim">프롬프트를 새로 만들 영역을 하나 이상 고르세요.</p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {ARTWORK_PARTS.map((part) => {
+              const checked = selectedParts.includes(part);
+              return (
+                <label
+                  key={part}
+                  className={`inline-flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-xs transition ${
+                    checked
+                      ? "border-amber/70 bg-amber/10 text-amber"
+                      : "border-line text-fg-muted hover:bg-panel-2 hover:text-fg"
+                  } ${running ? "cursor-not-allowed opacity-50" : ""}`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => togglePart(part)}
+                    className="accent-amber"
+                  />
+                  {PART_LABELS[part]}
+                </label>
+              );
+            })}
+          </div>
+          {!hasSelection && (
+            <p className="mt-2 text-xs text-rose">생성할 영역을 최소 1개 선택하세요.</p>
+          )}
+        </fieldset>
+
+        <div>
+          <label htmlFor="prompt-feeling" className="text-sm font-semibold text-fg">
+            2. 원하는 느낌
+          </label>
+          <p className="mt-1 text-xs text-fg-dim">
+            선택 입력입니다. 비우면 저장된 앨범 컨셉만 사용합니다.
+          </p>
+          <textarea
+            id="prompt-feeling"
+            value={feeling}
+            onChange={(event) => setFeeling(event.target.value)}
+            maxLength={2000}
+            disabled={running}
+            rows={4}
+            placeholder="예: 새벽 감성, 필름 사진 질감, 보라색 네온"
+            className="mt-3 w-full resize-y rounded-lg border border-line bg-ink/50 px-3 py-2.5 text-sm leading-6 text-fg outline-none transition placeholder:text-fg-dim focus:border-amber/60 disabled:cursor-not-allowed disabled:opacity-50"
+          />
+          <p className="mt-1 text-right font-mono text-[10px] text-fg-dim">
+            {feeling.length.toLocaleString()} / 2,000
           </p>
         </div>
-        <div className="flex flex-col items-end gap-2">
+
+        <div className="flex flex-wrap items-center gap-3 border-t border-line pt-5">
           <button
             type="button"
             onClick={() => void handleGenerate()}
-            disabled={running}
+            disabled={running || !hasSelection}
             className="rounded-xl bg-amber px-4 py-2.5 text-sm font-semibold text-ink transition hover:bg-amber-bright disabled:cursor-not-allowed disabled:opacity-40"
           >
-            {running ? "생성 중…" : hasPrompts ? "프롬프트 다시 생성" : "프롬프트 생성"}
+            {running ? "생성 중…" : "프롬프트 생성"}
           </button>
           {running && (
             <button
@@ -170,8 +242,11 @@ export default function PromptsClient({ projectId }: { projectId: string }) {
               중단
             </button>
           )}
+          {!running && hasSelection && (
+            <span className="text-xs text-fg-dim">선택한 {selectedParts.length}개 영역을 생성합니다.</span>
+          )}
         </div>
-      </div>
+      </section>
 
       <section className="rounded-xl border border-line bg-panel/60 p-5 text-sm">
         <h3 className="font-mono text-[11px] uppercase tracking-[0.18em] text-fg-dim">
@@ -218,8 +293,10 @@ export default function PromptsClient({ projectId }: { projectId: string }) {
 
       {hasPrompts ? (
         <div className="grid gap-4 md:grid-cols-2">
-          {ARTWORK_PARTS.map((part) => {
-            const text = prompts[part];
+          {visibleParts.map((part) => {
+            const text = prompts[part] as string;
+            const isPrevious =
+              latestGeneratedParts === null || !latestGeneratedParts.includes(part);
             return (
               <article
                 key={part}
@@ -227,13 +304,19 @@ export default function PromptsClient({ projectId }: { projectId: string }) {
               >
                 <header className="flex flex-wrap items-start justify-between gap-2">
                   <div>
-                    <h3 className="text-sm font-semibold text-fg">{PART_LABELS[part]}</h3>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h3 className="text-sm font-semibold text-fg">{PART_LABELS[part]}</h3>
+                      {isPrevious && (
+                        <span className="rounded-full border border-line bg-ink/50 px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.12em] text-fg-dim">
+                          이전 생성
+                        </span>
+                      )}
+                    </div>
                     <p className="mt-0.5 text-[11px] text-fg-dim">{ASPECT_NOTE[part]}</p>
                   </div>
                   <button
                     type="button"
                     onClick={() => void handleCopy(part)}
-                    disabled={!text}
                     className={`rounded-lg border px-3 py-1.5 text-xs transition disabled:opacity-30 ${
                       copied === part
                         ? "border-teal/60 bg-teal/10 text-teal"
@@ -243,13 +326,9 @@ export default function PromptsClient({ projectId }: { projectId: string }) {
                     {copied === part ? "복사됨 ✓" : "복사"}
                   </button>
                 </header>
-                {text ? (
-                  <p className="mt-3 flex-1 select-text whitespace-pre-wrap rounded-lg border border-line/70 bg-ink/50 px-3 py-2.5 text-[13px] leading-6 text-fg">
-                    {text}
-                  </p>
-                ) : (
-                  <p className="mt-3 text-xs text-fg-dim">아직 프롬프트가 없습니다.</p>
-                )}
+                <p className="mt-3 flex-1 select-text whitespace-pre-wrap rounded-lg border border-line/70 bg-ink/50 px-3 py-2.5 text-[13px] leading-6 text-fg">
+                  {text}
+                </p>
               </article>
             );
           })}
