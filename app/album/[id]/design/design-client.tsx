@@ -17,6 +17,7 @@ import {
   PART_LABELS,
   PRINT_SPECS,
 } from "@/lib/types";
+import { readDesignStream } from "./read-design-stream";
 
 const PX_PER_MM = 96 / 25.4;
 const PREVIEW_SCALE = 0.3;
@@ -74,6 +75,20 @@ const MODE_LABELS: Record<PartMode, string> = {
 type PartModes = Record<ArtworkPart, PartMode>;
 type PartPhotos = Partial<Record<ArtworkPart, string>>;
 type PartPhotoFits = Partial<Record<ArtworkPart, PhotoFit>>;
+type PartPrompts = Partial<Record<ArtworkPart, string>>;
+
+/** 영역별 컨셉 프롬프트 최대 길이 (PATCH 검증과 동일) */
+const MAX_PART_PROMPT = 2000;
+
+/** 빈 값은 빼고 저장용 맵으로 만든다 */
+function cleanPrompts(prompts: PartPrompts): PartPrompts {
+  const out: PartPrompts = {};
+  for (const part of ARTWORK_PARTS) {
+    const text = prompts[part];
+    if (text && text.trim()) out[part] = text.slice(0, MAX_PART_PROMPT);
+  }
+  return out;
+}
 
 /** 저장된 partModes 를 기본값으로 채워 전 영역이 채워진 맵으로 만든다 */
 function readModes(artwork: ArtworkState | undefined): PartModes {
@@ -91,34 +106,6 @@ function readModes(artwork: ArtworkState | undefined): PartModes {
 const fileUrl = (projectId: string, type: "artwork" | "asset", name: string) =>
   `/api/projects/${encodeURIComponent(projectId)}/file?type=${type}&name=${encodeURIComponent(name)}`;
 
-/** SSE 응답을 읽어 DesignEvent 로 콜백 */
-async function readDesignStream(
-  response: Response,
-  onEvent: (event: DesignEvent) => void,
-): Promise<void> {
-  if (!response.body) throw new Error("응답 스트림이 없습니다");
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let sep: number;
-    while ((sep = buffer.indexOf("\n\n")) >= 0) {
-      const frame = buffer.slice(0, sep);
-      buffer = buffer.slice(sep + 2);
-      const dataLine = frame.split("\n").find((line) => line.startsWith("data:"));
-      if (!dataLine) continue; // 하트비트 주석(: keep-alive) 등
-      try {
-        onEvent(JSON.parse(dataLine.slice(5).trim()) as DesignEvent);
-      } catch {
-        /* 부분 프레임 무시 */
-      }
-    }
-  }
-}
-
 type Busy = "generate" | "refine" | "part" | "delete" | null;
 
 export default function DesignClient({ projectId }: { projectId: string }) {
@@ -131,6 +118,7 @@ export default function DesignClient({ projectId }: { projectId: string }) {
   const [partModes, setPartModes] = useState<PartModes>({ ...DEFAULT_PART_MODES });
   const [partPhotos, setPartPhotos] = useState<PartPhotos>({});
   const [partPhotoFits, setPartPhotoFits] = useState<PartPhotoFits>({});
+  const [partPrompts, setPartPrompts] = useState<PartPrompts>({});
   const [partsError, setPartsError] = useState<string | null>(null);
   const [partsSaved, setPartsSaved] = useState(false);
 
@@ -158,6 +146,10 @@ export default function DesignClient({ projectId }: { projectId: string }) {
   const saveChainRef = useRef<Promise<boolean>>(Promise.resolve(true));
   /** 서버 값으로 제작 방식을 초기화했는지 (사용자 편집 덮어쓰기 방지) */
   const partsInitRef = useRef(false);
+  /** 영역별 지시가 저장되지 않은 채 바뀌었는지 */
+  const promptsDirtyRef = useRef(false);
+  /** 마지막 영역별 지시 저장 (blur 직후 버튼 클릭 시 완료를 기다리기 위함) */
+  const promptsSaveRef = useRef<Promise<boolean>>(Promise.resolve(true));
 
   // ── 로드 ──────────────────────────────────────────────────
   const loadProject = useCallback(
@@ -175,6 +167,7 @@ export default function DesignClient({ projectId }: { projectId: string }) {
             setPartModes(readModes(data.artwork));
             setPartPhotos({ ...(data.artwork?.partPhotos ?? {}) });
             setPartPhotoFits({ ...(data.artwork?.partPhotoFits ?? {}) });
+            setPartPrompts({ ...(data.artwork?.partPrompts ?? {}) });
           }
           setLoadError(null);
         })
@@ -239,7 +232,12 @@ export default function DesignClient({ projectId }: { projectId: string }) {
   // ── 제작 방식 저장 ────────────────────────────────────────
   /** 최신 project 를 다시 읽어 artwork 의 다른 필드를 보존한 채 병합 PATCH */
   const persistParts = useCallback(
-    (modes: PartModes, photos: PartPhotos, fits: PartPhotoFits): Promise<boolean> => {
+    (
+      modes: PartModes,
+      photos: PartPhotos,
+      fits: PartPhotoFits,
+      prompts: PartPrompts,
+    ): Promise<boolean> => {
       const run = async (): Promise<boolean> => {
         try {
           const latestRes = await fetch(
@@ -255,6 +253,7 @@ export default function DesignClient({ projectId }: { projectId: string }) {
             partModes: modes,
             partPhotos: photos,
             partPhotoFits: fits,
+            partPrompts: cleanPrompts(prompts),
           };
           const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}`, {
             method: "PATCH",
@@ -288,7 +287,7 @@ export default function DesignClient({ projectId }: { projectId: string }) {
   function changeMode(part: ArtworkPart, mode: PartMode) {
     const nextModes: PartModes = { ...partModes, [part]: mode };
     setPartModes(nextModes);
-    void persistParts(nextModes, partPhotos, partPhotoFits);
+    void persistParts(nextModes, partPhotos, partPhotoFits, partPrompts);
   }
 
   function changePhoto(part: ArtworkPart, filename: string) {
@@ -296,13 +295,33 @@ export default function DesignClient({ projectId }: { projectId: string }) {
     if (nextPhotos[part] === filename) delete nextPhotos[part];
     else nextPhotos[part] = filename;
     setPartPhotos(nextPhotos);
-    void persistParts(partModes, nextPhotos, partPhotoFits);
+    void persistParts(partModes, nextPhotos, partPhotoFits, partPrompts);
   }
 
   function changePhotoFit(part: ArtworkPart, fit: PhotoFit) {
     const nextFits: PartPhotoFits = { ...partPhotoFits, [part]: fit };
     setPartPhotoFits(nextFits);
-    void persistParts(partModes, partPhotos, nextFits);
+    void persistParts(partModes, partPhotos, nextFits, partPrompts);
+  }
+
+  /** 입력 중에는 로컬 상태만 바꾸고, 포커스를 벗어날 때 저장한다 */
+  function changePartPrompt(part: ArtworkPart, text: string) {
+    setPartPrompts((cur) => ({ ...cur, [part]: text.slice(0, MAX_PART_PROMPT) }));
+    promptsDirtyRef.current = true;
+  }
+
+  /** 영역별 지시가 바뀌었으면 저장 (생성/재생성/수정 전에도 호출) */
+  function flushPartPrompts(): Promise<boolean> {
+    if (!promptsDirtyRef.current) return promptsSaveRef.current;
+    promptsDirtyRef.current = false;
+    const saving = persistParts(partModes, partPhotos, partPhotoFits, partPrompts).then(
+      (ok) => {
+        if (!ok) promptsDirtyRef.current = true; // 다음 기회에 다시 저장
+        return ok;
+      },
+    );
+    promptsSaveRef.current = saving;
+    return saving;
   }
 
   // ── 사진 업로드 ───────────────────────────────────────────
@@ -476,7 +495,8 @@ export default function DesignClient({ projectId }: { projectId: string }) {
     try {
       // 서버가 project.concept / artwork.partModes 를 읽으므로 먼저 저장한다
       if (!(await saveConcept())) return;
-      if (!(await persistParts(partModes, partPhotos, partPhotoFits))) {
+      promptsDirtyRef.current = false;
+      if (!(await persistParts(partModes, partPhotos, partPhotoFits, partPrompts))) {
         setRunError("제작 방식을 저장하지 못해 생성을 중단했습니다.");
         return;
       }
@@ -499,6 +519,11 @@ export default function DesignClient({ projectId }: { projectId: string }) {
     setRunError(null);
     setLogs([]);
     try {
+      // 서버가 artwork.partPrompts 를 읽으므로 편집 중이던 영역별 지시를 먼저 저장한다
+      if (!(await flushPartPrompts())) {
+        setRunError("영역별 지시를 저장하지 못해 수정을 중단했습니다.");
+        return;
+      }
       const ok = await runDesignStream("/api/design/refine", {
         projectId,
         variant: index,
@@ -524,6 +549,10 @@ export default function DesignClient({ projectId }: { projectId: string }) {
     setRunError(null);
     setLogs([]);
     try {
+      if (!(await flushPartPrompts())) {
+        setRunError("영역별 지시를 저장하지 못해 재생성을 중단했습니다.");
+        return;
+      }
       await runDesignStream("/api/design/part", { projectId, variant: index, part });
     } finally {
       setBusy(null);
@@ -681,6 +710,12 @@ export default function DesignClient({ projectId }: { projectId: string }) {
             배경 그림은 ChatGPT 등에서 생성한 이미지를 업로드해 &ldquo;내 사진&rdquo;으로
             지정하면 됩니다.
           </p>
+          <Link
+            href={`/album/${encodeURIComponent(projectId)}/prompts`}
+            className="mt-2 inline-flex items-center gap-1 rounded-lg border border-teal/50 px-3 py-1.5 text-xs text-teal transition hover:bg-teal/10"
+          >
+            ChatGPT용 이미지 프롬프트 만들기 →
+          </Link>
           <p className="mt-1 text-xs text-fg-dim">
             JPEG · PNG · WebP · 개당 5MB 까지. 아트워크 HTML 안에 base64 로 삽입됩니다.
           </p>
@@ -759,6 +794,27 @@ export default function DesignClient({ projectId }: { projectId: string }) {
                     );
                   })}
                 </div>
+
+                {partModes[part] === "ai" && (
+                  <div className="mt-3">
+                    <textarea
+                      aria-label={`${PART_LABELS[part]} 전용 지시`}
+                      value={partPrompts[part] ?? ""}
+                      onChange={(e) => changePartPrompt(part, e.target.value)}
+                      onBlur={() => void flushPartPrompts()}
+                      rows={2}
+                      maxLength={MAX_PART_PROMPT}
+                      disabled={running}
+                      placeholder="이 영역만의 지시 (비우면 전체 컨셉만 사용)"
+                      className="w-full resize-y rounded-md border border-line bg-ink/60 px-2.5 py-1.5 text-[11px] leading-4 text-fg outline-none placeholder:text-fg-dim focus:border-amber/60 disabled:opacity-50"
+                    />
+                    {(partPrompts[part]?.length ?? 0) > MAX_PART_PROMPT * 0.9 && (
+                      <p className="mt-1 text-right font-mono text-[10px] text-fg-dim">
+                        {partPrompts[part]?.length ?? 0}/{MAX_PART_PROMPT}
+                      </p>
+                    )}
+                  </div>
+                )}
 
                 {partModes[part] === "photo" && (
                   <div className="mt-3">

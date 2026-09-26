@@ -82,6 +82,19 @@ export async function persistVariant(
   return saved;
 }
 
+/** ChatGPT 이미지 프롬프트를 artwork.imagePrompts 에 저장 (다른 artwork 필드 보존) */
+export async function persistImagePrompts(
+  projectId: string,
+  imagePrompts: Partial<Record<ArtworkPart, string>>,
+): Promise<AlbumProject> {
+  const saved = await updateProjectWith(projectId, (project) => {
+    const prev = normalizeArtwork(project.artwork);
+    return { ...project, artwork: { ...prev, imagePrompts: { ...imagePrompts } } };
+  });
+  if (!saved) throw new Error("프롬프트 저장 중 앨범이 삭제되었습니다");
+  return saved;
+}
+
 /** 안 하나를 통째로 제거 (selected 가 그 안이면 해제) */
 export async function persistVariantRemoval(
   projectId: string,

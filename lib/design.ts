@@ -70,6 +70,14 @@ const MAX_PHOTO_TOTAL_BYTES = 12 * 1024 * 1024; // 합계 12MB
 /** refine/part 재생성 시 기존 HTML 을 컨텍스트로 넣을 때의 문자 수 상한 */
 const MAX_CONTEXT_CHARS = 9000;
 const MAX_REFERENCE_CHARS = 6000;
+/** 영역별 컨셉 프롬프트 상한 (PATCH 검증과 동일) */
+const MAX_PART_PROMPT_CHARS = 2000;
+/** ChatGPT 이미지 프롬프트 1개 상한 (PATCH 검증 artwork.imagePrompts 4000자와 맞춘다) */
+export const MAX_IMAGE_PROMPT_CHARS = 4000;
+/** 이미지 프롬프트 생성 타임아웃 (기본 5분) */
+const IMAGE_PROMPT_TIMEOUT_MS = Number(
+  process.env.CDSTUDIO_IMAGE_PROMPT_TIMEOUT_MS ?? 5 * 60 * 1000,
+);
 const MAX_STDOUT_BYTES = 10 * 1024 * 1024;
 const MAX_STDERR_BYTES = 64 * 1024;
 
@@ -611,6 +619,30 @@ interface PromptInput {
   };
 }
 
+/** 영역별 컨셉 프롬프트 1개 (공백 정리 + 상한). 없으면 "" */
+function partPromptOf(project: AlbumProject, part: ArtworkPart): string {
+  const raw = project.artwork?.partPrompts?.[part];
+  if (typeof raw !== "string") return "";
+  return raw.trim().slice(0, MAX_PART_PROMPT_CHARS);
+}
+
+/**
+ * 요청한 영역 중 전용 지시가 있는 영역만 모아 프롬프트 섹션으로 만든다.
+ * 전체 컨셉을 대체하지 않고 "더해서" 적용하도록 명시한다. 없으면 빈 배열.
+ */
+function partPromptSection(project: AlbumProject, parts: readonly ArtworkPart[]): string[] {
+  const entries = parts
+    .map((part) => [part, partPromptOf(project, part)] as const)
+    .filter(([, text]) => text.length > 0);
+  if (entries.length === 0) return [];
+  return [
+    "## 영역별 전용 지시 (전체 컨셉에 더해서 해당 영역에만 적용)",
+    "전체 컨셉 요청은 그대로 유지하고, 아래 지시를 해당 영역에 추가로 반영한다.",
+    ...entries.map(([part, text]) => `- ${PART_LABELS[part]} — 이 영역 전용 지시: ${text}`),
+    "",
+  ];
+}
+
 export function buildPrompt(input: PromptInput): string {
   const { project, index, parts, photos, refine, reference } = input;
   const withName = input.withName ?? true;
@@ -630,6 +662,7 @@ export function buildPrompt(input: PromptInput): string {
     "### 트랙리스트",
     trackListText(project.tracks),
     "",
+    ...partPromptSection(project, parts),
     "## 실치수 규격 (반드시 준수)",
     parts.map(partSpecText).join("\n"),
     "",
@@ -714,12 +747,14 @@ function stripFences(block: string): string {
   return s.trim();
 }
 
-/** 마커 기반 파싱 (마커 순서 무관). 실패 시 DesignError */
-export function parseDesignOutput(
+/**
+ * ###NAME### / ###<PART>### / ###END### 마커로 출력을 나눈다 (마커 순서 무관).
+ * 반환 함수: 키("__name__" 또는 영역)의 본문, 마커가 없으면 null.
+ */
+function markerSlicer(
   raw: string,
-  parts: ArtworkPart[],
-  fallbackName: string,
-): ParsedVariant {
+  parts: readonly ArtworkPart[],
+): (key: string) => string | null {
   const text = raw.replace(/\r\n/g, "\n");
 
   const found: { key: string; contentStart: number; markerStart: number }[] = [];
@@ -734,12 +769,21 @@ export function parseDesignOutput(
   locate("__end__", "END");
   found.sort((a, b) => a.markerStart - b.markerStart);
 
-  const sliceFor = (key: string): string | null => {
+  return (key: string): string | null => {
     const i = found.findIndex((f) => f.key === key);
     if (i < 0) return null;
     const next = found[i + 1];
     return text.slice(found[i].contentStart, next ? next.markerStart : text.length);
   };
+}
+
+/** 마커 기반 파싱 (마커 순서 무관). 실패 시 DesignError */
+export function parseDesignOutput(
+  raw: string,
+  parts: ArtworkPart[],
+  fallbackName: string,
+): ParsedVariant {
+  const sliceFor = markerSlicer(raw, parts);
 
   const rawName = sliceFor("__name__");
   const name = rawName
@@ -1381,4 +1425,189 @@ export async function regeneratePart(
   files[part] = await writePartHtml(project.id, index, part, html);
   opts.onStatus?.(`${index}안 ${PART_LABELS[part]} 완료`);
   return { index, name, files };
+}
+
+// ── ChatGPT 이미지 프롬프트 생성 ──────────────────────────────
+//
+// 사용자는 이미지를 ChatGPT(구독)에서 직접 만든다. 여기서는 codex 가
+// 앨범 정보로 영역별 "ChatGPT 에 붙여넣을 한국어 이미지 생성 프롬프트"를 쓴다.
+// 결과는 텍스트일 뿐 HTML 로 렌더되지 않는다 (UI 에서 텍스트로만 표시).
+
+interface ImagePromptRule {
+  /** 프롬프트에 반드시 들어가야 하는 조건 문장 */
+  text: string;
+  /** 이미 포함됐는지 판단하는 느슨한 검사 */
+  present: (prompt: string) => boolean;
+}
+
+/** 영역별 비율 안내 (UI 에도 표시) */
+export function imageAspectText(part: ArtworkPart): string {
+  if (part === "back" || part === "back-inner") {
+    const spec = PRINT_SPECS[part];
+    return `가로형 (가로:세로 약 5:4 · ${spec.widthMm}×${spec.heightMm}mm)`;
+  }
+  if (part === "label") return "정사각형 (1:1 · 원형으로 잘림)";
+  return "정사각형 (1:1)";
+}
+
+/** 영역마다 반드시 지켜야 할 조건 (codex 지시 + 누락 시 서버가 덧붙임) */
+function imagePromptRules(part: ArtworkPart): ImagePromptRule[] {
+  const landscape = part === "back" || part === "back-inner";
+  const rules: ImagePromptRule[] = [
+    landscape
+      ? {
+          text: "비율: 가로형 (가로:세로 약 5:4)",
+          present: (p) => /가로형/.test(p),
+        }
+      : {
+          text: "비율: 정사각형 (1:1)",
+          present: (p) => /정사각형|1\s*:\s*1/.test(p),
+        },
+    {
+      text: "CD 목업·케이스·디스크·손·프레임 없이, 인쇄용 배경 아트워크만 그릴 것",
+      present: (p) => /목업/.test(p) && /배경/.test(p),
+    },
+    {
+      text: "글자·텍스트·로고를 넣지 말 것",
+      present: (p) => /(글자|텍스트)/.test(p) && /로고/.test(p),
+    },
+  ];
+  if (landscape) {
+    rules.push({
+      text: "중요한 요소는 중앙에 둘 것 (좌우 가장자리는 접히는 옆면)",
+      present: (p) => /중앙/.test(p) && /(가장자리|옆면)/.test(p),
+    });
+  }
+  if (part === "label") {
+    rules.push({
+      text: "중요한 요소는 중앙에 둘 것 (원형으로 잘림)",
+      present: (p) => /중앙/.test(p) && /원형/.test(p),
+    });
+  }
+  return rules;
+}
+
+/** 영역별 그림 역할 설명 (codex 에게 주는 맥락) */
+const IMAGE_PART_ROLE: Record<ArtworkPart, string> = {
+  front:
+    "앨범의 얼굴. 한눈에 앨범 분위기가 드러나는 대표 이미지. 제목 글자는 앱이 나중에 얹으므로 여백이 조금 있으면 좋다.",
+  "front-inner": "북릿을 펼쳤을 때 보이는 안쪽면. 앞표지와 같은 세계관의 차분한 변주.",
+  label:
+    "CD 디스크 표면에 인쇄되는 원형 라벨. 가운데 구멍(지름 23mm)과 허브 주변은 가려지므로 패턴/질감이 원 전체에 고르게 퍼지는 구성이 좋다.",
+  back: "트레이 카드 겉면(케이스 뒷면). 트랙리스트 글자가 위에 얹히므로 너무 복잡하지 않은 배경이 좋다.",
+  "back-inner": "트레이 카드 안쪽면. CD 트레이 밑에 비쳐 보이는 면. 시원한 이미지·패턴 중심.",
+};
+
+export function buildImagePromptsPrompt(project: AlbumProject): string {
+  const concept = project.concept?.trim();
+  const partBlocks = ARTWORK_PARTS.map((part) => {
+    const extra = partPromptOf(project, part);
+    return [
+      `### ${PART_LABELS[part]} (${part})`,
+      `- 역할: ${IMAGE_PART_ROLE[part]}`,
+      `- 비율: ${imageAspectText(part)}`,
+      ...(extra ? [`- 사용자의 이 영역 전용 지시: ${extra}`] : []),
+      "- 이 영역 프롬프트에 반드시 포함할 조건:",
+      ...imagePromptRules(part).map((r) => `  * ${r.text}`),
+    ].join("\n");
+  }).join("\n\n");
+
+  const lines = [
+    "너는 음반 아트워크 아트 디렉터다. 개인 소장용 부틀렉 CD 의 인쇄물 5영역에 쓸 배경 이미지를,",
+    "사용자가 ChatGPT(이미지 생성)에 그대로 붙여넣을 수 있는 프롬프트로 써 준다.",
+    "",
+    "## 앨범 정보",
+    `- 앨범명: ${project.title}`,
+    `- 아티스트: ${project.artist}`,
+    `- 전체 컨셉: ${concept || "(지정 없음 — 트랙 분위기에서 자유롭게 해석)"}`,
+    `- 트랙 수: ${project.tracks.length}`,
+    "",
+    "### 트랙리스트 (분위기 참고용 — 제목 글자를 그림에 넣지 말 것)",
+    trackListText(project.tracks),
+    "",
+    "## 작성 규칙 (모든 영역 공통)",
+    "1. 한국어로 쓴다. 사용자가 ChatGPT 에 한국어로 붙여넣는다.",
+    "2. 각 프롬프트는 그 자체로 완결되어야 한다 (다른 영역을 참조하지 말 것). 3~8문장 정도.",
+    "3. 주제·장면, 색 팔레트, 조명, 질감/화풍(사진·일러스트·회화 등), 구도를 구체적으로 묘사한다.",
+    "4. 5영역이 한 시리즈로 보이도록 색·화풍·모티프를 공유하되, 영역마다 구도는 다르게 한다.",
+    '5. 비율을 반드시 명시한다 — 앞표지·앞표지 내부·CD 라벨은 "정사각형(1:1)", 뒷표지·뒷표지 내부는 "가로형".',
+    '6. "CD 목업·케이스·디스크·손·프레임 없이, 인쇄용 배경 아트워크만" 이라는 조건을 반드시 넣는다.',
+    '7. "글자·텍스트·로고 넣지 말 것" 을 반드시 넣는다 (글자는 앱이 나중에 얹는다).',
+    '8. 뒷표지·뒷표지 내부에는 "중요한 요소는 중앙에 (좌우 가장자리는 접히는 옆면)" 을 넣는다.',
+    '9. CD 라벨에는 "중요한 요소는 중앙에 (원형으로 잘림)" 을 넣는다.',
+    "10. 실존 인물의 얼굴·상표·저작권 캐릭터를 그리라고 요구하지 않는다.",
+    "",
+    "## 영역별 정보",
+    partBlocks,
+    "",
+    "## 출력 형식 (반드시 그대로 지킬 것)",
+    "",
+    "아래 마커를 각각 독립된 줄에 정확히 그대로 출력하고, 마커 사이에 해당 영역 프롬프트 본문만 넣는다.",
+    "설명·머리말·꼬리말·마크다운 코드펜스(```)·제목을 쓰지 말 것.",
+    "파일을 직접 만들거나 셸 명령을 실행하지 말 것 — 결과는 오직 아래 텍스트 형식으로만 답한다.",
+    "",
+    ...ARTWORK_PARTS.flatMap((part) => [
+      `###${PART_MARKER[part]}###`,
+      `(${PART_LABELS[part]} ChatGPT 이미지 생성 프롬프트)`,
+    ]),
+    "###END###",
+  ];
+  return lines.join("\n");
+}
+
+/** 누락된 필수 조건을 덧붙이고 길이 상한을 맞춘다 */
+export function finalizeImagePrompt(part: ArtworkPart, body: string): string {
+  const missing = imagePromptRules(part).filter((r) => !r.present(body));
+  const suffix =
+    missing.length > 0 ? `\n\n[필수 조건]\n${missing.map((r) => `- ${r.text}`).join("\n")}` : "";
+  const room = MAX_IMAGE_PROMPT_CHARS - suffix.length;
+  const trimmed =
+    body.length > room ? `${body.slice(0, Math.max(0, room - 1)).trimEnd()}…` : body;
+  return `${trimmed}${suffix}`;
+}
+
+/** codex 출력 → 영역별 프롬프트. 한 영역이라도 없으면 DesignError */
+export function parseImagePromptsOutput(raw: string): Record<ArtworkPart, string> {
+  const sliceFor = markerSlicer(raw, ARTWORK_PARTS);
+  const out = {} as Record<ArtworkPart, string>;
+  const missing: ArtworkPart[] = [];
+  for (const part of ARTWORK_PARTS) {
+    const block = sliceFor(part);
+    const body = block === null ? "" : stripFences(block);
+    if (body.length < 20) {
+      missing.push(part);
+      continue;
+    }
+    out[part] = finalizeImagePrompt(part, body);
+  }
+  if (missing.length > 0) {
+    throw new DesignError(
+      `생성 결과에서 ${missing.map((p) => PART_LABELS[p]).join(", ")} 프롬프트를 찾지 못했습니다`,
+    );
+  }
+  return out;
+}
+
+export interface ImagePromptsOptions {
+  onStatus?: StatusFn;
+  signal?: AbortSignal;
+}
+
+/** 5영역 ChatGPT 이미지 프롬프트를 AI CLI 1회 호출로 만든다 (저장은 호출자 몫) */
+export async function generateImagePrompts(
+  project: AlbumProject,
+  opts: ImagePromptsOptions = {},
+): Promise<Record<ArtworkPart, string>> {
+  const cwd = artworkDir(project.id);
+  await fs.mkdir(cwd, { recursive: true });
+  opts.onStatus?.(
+    `이미지 프롬프트 작성 중… (${ENGINE_LABEL[currentEngine()]} 호출, 1~2분 걸릴 수 있습니다)`,
+  );
+  const raw = await runEngine(buildImagePromptsPrompt(project), {
+    cwd,
+    timeoutMs: IMAGE_PROMPT_TIMEOUT_MS,
+    ...(opts.signal ? { signal: opts.signal } : {}),
+  });
+  opts.onStatus?.("응답을 정리하는 중…");
+  return parseImagePromptsOutput(raw);
 }
