@@ -171,6 +171,11 @@ export interface ArtworkState {
   partPhotos?: Partial<Record<ArtworkPart, string>>;
   /** photo 모드 배치 방식. 기본 "cover" */
   partPhotoFits?: Partial<Record<ArtworkPart, PhotoFit>>;
+  /**
+   * 영역별 컨셉 프롬프트 (ai 모드 영역에만 적용).
+   * 비어 있으면 전체 컨셉(project.concept)만 사용, 있으면 전체 컨셉에 더해 반영.
+   */
+  partPrompts?: Partial<Record<ArtworkPart, string>>;
   /** 인쇄 미세조정 (인쇄 미리보기에서 편집, 화면·인쇄 공통 적용) */
   partTransforms?: Partial<Record<ArtworkPart, PartTransform>>;
 }

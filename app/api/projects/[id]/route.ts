@@ -208,6 +208,20 @@ function validatePartPhotoFits(
   return Object.keys(fits).length > 0 ? fits : undefined;
 }
 
+function validatePartPrompts(
+  value: unknown,
+): Partial<Record<ArtworkPart, string>> | undefined {
+  const o = asRecord(value, "artwork.partPrompts");
+  const prompts: Partial<Record<ArtworkPart, string>> = {};
+  for (const part of ARTWORK_PARTS) {
+    const raw = o[part];
+    if (raw === undefined || raw === null || raw === "") continue;
+    const text = asString(raw, `artwork.partPrompts.${part}`, 2000);
+    if (text.trim()) prompts[part] = text;
+  }
+  return Object.keys(prompts).length > 0 ? prompts : undefined;
+}
+
 function validatePartPhotos(value: unknown): Partial<Record<ArtworkPart, string>> | undefined {
   const o = asRecord(value, "artwork.partPhotos");
   const photos: Partial<Record<ArtworkPart, string>> = {};
@@ -249,6 +263,10 @@ function validateArtwork(value: unknown): ArtworkState {
   if (o.partPhotoFits !== undefined && o.partPhotoFits !== null) {
     const fits = validatePartPhotoFits(o.partPhotoFits);
     if (fits) artwork.partPhotoFits = fits;
+  }
+  if (o.partPrompts !== undefined && o.partPrompts !== null) {
+    const prompts = validatePartPrompts(o.partPrompts);
+    if (prompts) artwork.partPrompts = prompts;
   }
   if (o.partTransforms !== undefined && o.partTransforms !== null) {
     const transforms = validatePartTransforms(o.partTransforms);
