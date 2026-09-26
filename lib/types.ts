@@ -176,6 +176,11 @@ export interface ArtworkState {
    * 비어 있으면 전체 컨셉(project.concept)만 사용, 있으면 전체 컨셉에 더해 반영.
    */
   partPrompts?: Partial<Record<ArtworkPart, string>>;
+  /**
+   * 프롬프트 생성 페이지가 만든 ChatGPT 이미지 생성용 프롬프트 (영역별).
+   * POST /api/design/prompts 가 생성·저장. 사용자가 복사해 ChatGPT에서 이미지 생성.
+   */
+  imagePrompts?: Partial<Record<ArtworkPart, string>>;
   /** 인쇄 미세조정 (인쇄 미리보기에서 편집, 화면·인쇄 공통 적용) */
   partTransforms?: Partial<Record<ArtworkPart, PartTransform>>;
 }

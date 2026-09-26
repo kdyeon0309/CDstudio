@@ -268,6 +268,17 @@ function validateArtwork(value: unknown): ArtworkState {
     const prompts = validatePartPrompts(o.partPrompts);
     if (prompts) artwork.partPrompts = prompts;
   }
+  if (o.imagePrompts !== undefined && o.imagePrompts !== null) {
+    // 형태는 partPrompts 와 동일 (영역 → 문자열). 길이 상한만 넉넉히.
+    const raw = asRecord(o.imagePrompts, "artwork.imagePrompts");
+    const prompts: Partial<Record<ArtworkPart, string>> = {};
+    for (const part of ARTWORK_PARTS) {
+      const v = raw[part];
+      if (v === undefined || v === null || v === "") continue;
+      prompts[part] = asString(v, `artwork.imagePrompts.${part}`, 4000);
+    }
+    if (Object.keys(prompts).length > 0) artwork.imagePrompts = prompts;
+  }
   if (o.partTransforms !== undefined && o.partTransforms !== null) {
     const transforms = validatePartTransforms(o.partTransforms);
     if (transforms) artwork.partTransforms = transforms;
