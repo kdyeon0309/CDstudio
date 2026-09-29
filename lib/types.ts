@@ -49,6 +49,8 @@ export interface AlbumProject {
   updatedAt: string;
   tracks: Track[]; // order 오름차순 유지
   artwork: ArtworkState;
+  /** 영역별 이미지 후보 스튜디오. 기존 artwork 3안은 그대로 보존한다. */
+  studio?: ArtworkStudio;
   burnSettings?: BurnSettings;
   burnedAt?: string;
 }
@@ -109,6 +111,7 @@ export interface ProbeItem {
 export type ExtractEvent =
   | { type: "track-start"; trackId: string; title: string }
   | { type: "progress"; trackId: string; phase: "download" | "convert"; percent: number }
+  | { type: "track-retry"; trackId: string; attempt: number; maxAttempts: number }
   | { type: "track-done"; trackId: string; track: Track }
   | { type: "track-error"; trackId: string; message: string }
   | { type: "done"; project: AlbumProject }
@@ -126,12 +129,20 @@ export type ExtractEvent =
  */
 export type ArtworkPart = "front" | "front-inner" | "label" | "back" | "back-inner";
 
+/** 새 스튜디오에서 뒷표지의 양쪽 6.5mm 접힘 부분을 한 영역으로 별도 제작한다. */
+export type StudioArtworkPart = ArtworkPart | "back-spine";
+
 export const ARTWORK_PARTS: readonly ArtworkPart[] = [
   "front",
   "front-inner",
   "label",
   "back",
   "back-inner",
+];
+
+/** 기존 인쇄·HTML 디자인의 5영역 계약은 유지하고 스튜디오에만 스파인을 추가한다. */
+export const STUDIO_ARTWORK_PARTS: readonly StudioArtworkPart[] = [
+  "front", "front-inner", "label", "back", "back-spine", "back-inner",
 ];
 
 /** 영역 한국어 이름 (UI 공용) */
@@ -141,6 +152,11 @@ export const PART_LABELS: Record<ArtworkPart, string> = {
   label: "CD 라벨",
   back: "뒷표지",
   "back-inner": "뒷표지 내부",
+};
+
+export const STUDIO_PART_LABELS: Record<StudioArtworkPart, string> = {
+  ...PART_LABELS,
+  "back-spine": "뒷표지 스파인",
 };
 
 /**
@@ -192,6 +208,66 @@ export interface ArtworkState {
  */
 export type PhotoFit = "cover" | "contain";
 
+/** 생성 결과는 UUID 파일로 보존하며 선택/재생성이 원본을 덮어쓰지 않는다. */
+export interface StudioCandidate {
+  id: string;
+  /** 기존 후보는 생성 이미지로 취급한다. */
+  source?: "generated" | "upload";
+  filename: string;
+  prompt: string;
+  referenceFiles: string[];
+  /** 생성 당시 참고 이미지 파일명 → 프롬프트에서 쓰던 임시 이름. */
+  referenceLabels?: Record<string, string>;
+  parentCandidateId?: string;
+  width: number;
+  height: number;
+  createdAt: string;
+  favorite?: boolean;
+}
+
+export interface StudioPresentation {
+  fit: PhotoFit;
+  transform: PartTransform;
+  overlay: {
+    enabled: boolean;
+    color: string;
+    position: "top" | "bottom";
+    fontSizeMm: number;
+  };
+}
+
+export interface StudioPart {
+  prompt: string;
+  referenceFiles: string[];
+  /** 이 영역의 AI 생성 참고 이미지별 임시 이름. */
+  referenceLabels?: Record<string, string>;
+  candidates: StudioCandidate[];
+  selectedCandidateId?: string;
+  presentation: StudioPresentation;
+}
+
+export interface StudioSnapshot {
+  id: string;
+  name: string;
+  createdAt: string;
+  parts: Partial<Record<StudioArtworkPart, {
+    candidateId: string;
+    presentation: StudioPresentation;
+  }>>;
+}
+
+export interface ArtworkStudio {
+  version: 1;
+  printSource: "studio" | "legacy";
+  parts: Partial<Record<StudioArtworkPart, StudioPart>>;
+  snapshots: StudioSnapshot[];
+}
+
+export type StudioImageEvent =
+  | { type: "status"; message: string }
+  | { type: "done"; project: AlbumProject; candidate: StudioCandidate }
+  | { type: "error"; message: string };
+
 /** 영역 콘텐츠의 인쇄 미세조정 — 이동(mm)·확대축소 */
 export interface PartTransform {
   /** 오른쪽으로 이동(mm), 음수 = 왼쪽. 범위 -60~60 */
@@ -233,6 +309,7 @@ export interface DriveStatus {
   connected: boolean; // 광학 드라이브 존재
   vendor?: string;
   product?: string;
+  mediaType?: string; // drutil Type (CD-R/CD-RW 등)
   mediaPresent: boolean; // 디스크 삽입됨
   blank: boolean; // 공디스크 여부
   erasable: boolean; // CD-RW 여부
@@ -250,6 +327,16 @@ export type BurnEvent =
 
 /** 굽기 사전 검증 상한 (분) — 80분 CD-R 마진 1분 */
 export const MAX_AUDIO_MINUTES = 79;
+/** Red Book 오디오 CD 트랙 수 상한 */
+export const MAX_BURN_TRACKS = 99;
+/** 첫 트랙 앞에는 고정 2초, 트랙 사이 기본 간격은 2초 */
+export const CD_LEAD_IN_SEC = 2;
+export const DEFAULT_BURN_PREGAP_SEC = 2;
+
+/** 데이터 DVD/BD를 오디오 CD 미디어로 잘못 인정하지 않는다. */
+export function isAudioCdMediaType(value: string | undefined): boolean {
+  return typeof value === "string" && /^CD-R(?:W)?(?:\b|$)/i.test(value.trim());
+}
 
 // ── 유틸 공용 ─────────────────────────────────────────────────
 
@@ -258,9 +345,22 @@ export function totalDurationSec(tracks: Track[]): number {
   return tracks.reduce((s, t) => s + (t.durationSec || 0), 0);
 }
 
+/** 오디오 + 첫 트랙 리드인 + 트랙 사이 간격의 예상 디스크 점유 시간. */
+export function discOccupancySec(audioSec: number, trackCount: number, pregapSec = DEFAULT_BURN_PREGAP_SEC): number {
+  if (trackCount <= 0) return audioSec;
+  return audioSec + CD_LEAD_IN_SEC + (trackCount - 1) * pregapSec;
+}
+
+/** BIN에는 각 트랙이 1/75초 CD 프레임 단위로 올림되어 기록된다. */
+export function discOccupancySecFromTracks(durationsSec: number[], pregapSec = DEFAULT_BURN_PREGAP_SEC): number {
+  const audioFrames = durationsSec.reduce((frames, seconds) => frames + Math.ceil(seconds * 75), 0);
+  return discOccupancySec(audioFrames / 75, durationsSec.length, pregapSec);
+}
+
 /** "MM:SS" 표기 */
 export function formatDuration(sec: number): string {
-  const m = Math.floor(sec / 60);
-  const s = Math.round(sec % 60);
+  const rounded = Number.isFinite(sec) ? Math.max(0, Math.round(sec)) : 0;
+  const m = Math.floor(rounded / 60);
+  const s = rounded % 60;
   return `${m}:${String(s).padStart(2, "0")}`;
 }

@@ -1,11 +1,11 @@
-import DesignClient from "./design-client";
+import StudioClient from "./studio-client";
 
-/** ④ 디자인 3안 생성 페이지. params 는 Promise 이므로 await 한다. */
+/** 영역별 이미지 디자인 스튜디오. */
 export default async function DesignPage({
   params,
 }: {
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  return <DesignClient projectId={id} />;
+  return <StudioClient projectId={id} />;
 }

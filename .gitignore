@@ -15,7 +15,9 @@
 
 # next.js
 /.next/
+/.next-studio-test/
 /out/
+/public/generated/
 
 # production
 /build
@@ -42,6 +44,7 @@ next-env.d.ts
 
 # user local dirs
 .config/
+/.tools/
 
 # agent orchestration files (local only)
 CLAUDE.md

@@ -1,0 +1,122 @@
+.wrapper { flex: none; }
+.sheet {
+  position: relative;
+  display: flex;
+  width: 210mm;
+  height: 297mm;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: white;
+  box-shadow: 0 24px 70px rgb(0 0 0 / 45%);
+  break-after: page;
+  page-break-after: always;
+}
+.lastSheet { break-after: auto; page-break-after: auto; }
+.sheetLabel {
+  position: absolute;
+  top: 8mm;
+  left: 50%;
+  translate: -50% 0;
+  color: #52525b;
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+.part { position: relative; flex: none; color-scheme: light; }
+.label { border-radius: 50%; }
+.contentClip { position: absolute; overflow: hidden; inset: 0; }
+.splitRegion { position: absolute; top: 0; bottom: 0; overflow: hidden; }
+.splitSpineLeft { left: 0; width: var(--spine-size); }
+.splitCenter { left: var(--spine-size); right: var(--spine-size); }
+.splitSpineRight { right: 0; width: var(--spine-size); }
+.imageTransform { position: absolute; inset: 0; transform-origin: center center; }
+.artworkImage { display: block; width: 100%; height: 100%; }
+.cover { object-fit: cover; }
+.contain { object-fit: contain; }
+.blurFill {
+  position: absolute;
+  width: 110%;
+  height: 110%;
+  top: -5%;
+  left: -5%;
+  object-fit: cover;
+  filter: blur(5mm);
+}
+.cropMarks { position: absolute; inset: 0; z-index: 5; pointer-events: none; }
+.cropMarks i { position: absolute; width: 6mm; height: 6mm; }
+.cropMarks i::before, .cropMarks i::after { position: absolute; content: ""; background: #111; }
+.cropMarks i::before { width: 4mm; height: 0.2mm; }
+.cropMarks i::after { width: 0.2mm; height: 4mm; }
+.cropTopLeft { top: -6mm; left: -6mm; }
+.cropTopRight { top: -6mm; right: -6mm; }
+.cropBottomLeft { bottom: -6mm; left: -6mm; }
+.cropBottomRight { bottom: -6mm; right: -6mm; }
+.cropTopLeft::before, .cropBottomLeft::before { left: 0; }
+.cropTopRight::before, .cropBottomRight::before { right: 0; }
+.cropTopLeft::after, .cropTopRight::after { top: 0; }
+.cropBottomLeft::after, .cropBottomRight::after { bottom: 0; }
+.cropTopLeft::before, .cropTopRight::before { bottom: 0; }
+.cropBottomLeft::before, .cropBottomRight::before { top: 0; }
+.cropTopLeft::after, .cropBottomLeft::after { right: 0; }
+.cropTopRight::after, .cropBottomRight::after { left: 0; }
+.foldLine { position: absolute; z-index: 4; top: 0; bottom: 0; border-left: 0.25mm dashed rgb(24 24 27 / 80%); pointer-events: none; }
+.foldLeft { left: var(--spine-size); }
+.foldRight { right: var(--spine-size); }
+.hole {
+  position: absolute;
+  z-index: 6;
+  top: 50%;
+  left: 50%;
+  width: var(--hole-size);
+  height: var(--hole-size);
+  box-sizing: border-box;
+  translate: -50% -50%;
+  border: 0.25mm solid #111;
+  border-radius: 50%;
+  background: white;
+  pointer-events: none;
+}
+.textOverlay {
+  position: absolute;
+  z-index: 2;
+  left: 8mm;
+  right: 8mm;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 1mm;
+  font-family: Arial, sans-serif;
+  line-height: 1.13;
+  overflow-wrap: anywhere;
+  text-shadow: 0 0.4mm 1.4mm rgb(0 0 0 / 70%);
+  pointer-events: none;
+}
+.textTop { top: 8mm; }
+.textBottom { bottom: 8mm; }
+.albumTitle { font-size: 1em; font-weight: 800; }
+.artist { font-size: 0.62em; font-weight: 600; }
+.labelText { left: 15mm; right: 15mm; height: 30mm; overflow: hidden; align-items: center; text-align: center; }
+.labelText.textTop { top: 7mm; }
+.labelText.textBottom { bottom: 7mm; }
+.backText { left: calc(var(--spine-size) + 5mm); right: calc(var(--spine-size) + 5mm); }
+.splitBackText { left: 5mm; right: 5mm; }
+.trackList { margin: 3mm 0 0; padding: 0; list-style: none; column-gap: 4mm; max-height: 83mm; }
+.trackList li { display: flex; gap: 1mm; break-inside: avoid; margin-bottom: 0.4mm; line-height: 1.08; }
+.trackList li span:nth-child(2) { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.trackList li span:last-child { white-space: nowrap; opacity: 0.75; }
+.trackList li span:first-child { opacity: 0.7; }
+.spineText { position: absolute; z-index: 3; top: 50%; width: 108mm; font: 700 2.5mm Arial, sans-serif; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center; text-shadow: 0 0.3mm 1mm rgb(0 0 0 / 70%); pointer-events: none; }
+.spineTextLeft { left: -51mm; transform: rotate(-90deg); }
+.spineTextRight { right: -51mm; transform: rotate(90deg); }
+.splitSpineText { position: absolute; z-index: 3; top: 3mm; bottom: 3mm; left: 0; right: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; writing-mode: vertical-rl; line-height: var(--spine-size, 6.5mm); font-family: Arial, sans-serif; font-weight: 700; text-shadow: 0 0.3mm 1mm rgb(0 0 0 / 70%); pointer-events: none; }
+.splitSpineTextLeft { transform: rotate(180deg); }
+.splitSpineTextStart { text-align: start; }
+.splitSpineTextEnd { text-align: end; }
+.safeArea { position: absolute; z-index: 4; inset: 5mm; border: 0.25mm dashed rgb(255 255 255 / 75%); box-shadow: inset 0 0 0 0.1mm rgb(0 0 0 / 55%); pointer-events: none; }
+@media print {
+  .wrapper { display: block; width: 210mm !important; height: 297mm !important; }
+  .sheet { zoom: 1 !important; box-shadow: none; }
+  .sheetLabel, .safeArea { display: none; }
+  /* 접는 위치는 작품 위 점선 대신 작품 바깥 위쪽의 짧은 표식으로만 남긴다. */
+  .foldLine { top: -4mm; bottom: auto; height: 2mm; border-left: 0.25mm solid #111; }
+}

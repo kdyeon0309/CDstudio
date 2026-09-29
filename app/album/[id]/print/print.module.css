@@ -230,14 +230,37 @@
 }
 
 @media screen and (max-width: 900px) {
-  .preview {
+  .sheet,
+  .scaledSheet {
     zoom: 0.72;
   }
 }
 
 @media screen and (max-width: 680px) {
-  .preview {
-    zoom: 0.5;
+  .sheet,
+  .scaledSheet {
+    zoom: 0.42;
+  }
+}
+
+@media screen and (max-width: 380px) {
+  .sheet,
+  .scaledSheet {
+    zoom: 0.4;
+  }
+}
+
+@media screen and (max-width: 365px) {
+  .sheet,
+  .scaledSheet {
+    zoom: 0.36;
+  }
+}
+
+@media screen and (max-width: 340px) {
+  .sheet,
+  .scaledSheet {
+    zoom: 0.34;
   }
 }
 
@@ -271,15 +294,26 @@
 
   .printRoot,
   .preview,
-  .sheetBlock {
+  .sheetBlock,
+  .scaledSheet {
     display: block;
     margin: 0;
     padding: 0;
     gap: 0;
   }
 
+  .scaledSheet,
   .sheet {
+    zoom: 1 !important;
     margin: 0;
     box-shadow: none;
+  }
+
+  /* 뒷표지의 점선은 미리보기 전용. 인쇄에는 이미지 위가 아닌 위쪽 표식만 남긴다. */
+  .foldLine {
+    top: -4mm;
+    bottom: auto;
+    height: 2mm;
+    border-left: 0.25mm solid #111;
   }
 }

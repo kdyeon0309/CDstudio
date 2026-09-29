@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import type { AlbumProject } from "@/lib/types";
@@ -11,7 +11,27 @@ export default function LibraryPage() {
   const router = useRouter();
   const [projects, setProjects] = useState<AlbumProject[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
   const [showModal, setShowModal] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [editingProject, setEditingProject] = useState<AlbumProject | null>(null);
+  const createTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const editTriggerRef = useRef<HTMLButtonElement | null>(null);
+
+  function openCreate(button: HTMLButtonElement) {
+    createTriggerRef.current = button;
+    setShowModal(true);
+  }
+
+  function closeCreate() {
+    setShowModal(false);
+    requestAnimationFrame(() => createTriggerRef.current?.focus());
+  }
+
+  function closeEdit() {
+    setEditingProject(null);
+    requestAnimationFrame(() => editTriggerRef.current?.focus());
+  }
 
   useEffect(() => {
     let active = true;
@@ -32,17 +52,26 @@ export default function LibraryPage() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [reloadKey]);
 
   async function handleDelete(id: string, title: string) {
+    if (deletingId) return;
     if (!confirm(`앨범 "${title}" 을(를) 삭제할까요?\n트랙·아트워크 파일이 모두 사라지며 되돌릴 수 없습니다.`)) {
       return;
     }
-    const res = await fetch(`/api/projects/${id}`, { method: "DELETE" });
-    if (res.ok) {
+    setDeletingId(id);
+    setError(null);
+    try {
+      const res = await fetch(`/api/projects/${id}`, { method: "DELETE" });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(data?.error || "앨범 삭제에 실패했습니다.");
+      }
       setProjects((cur) => (cur ? cur.filter((p) => p.id !== id) : cur));
-    } else {
-      alert("삭제에 실패했습니다.");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "앨범 삭제에 실패했습니다.");
+    } finally {
+      setDeletingId(null);
     }
   }
 
@@ -62,7 +91,7 @@ export default function LibraryPage() {
             </div>
           </div>
           <button
-            onClick={() => setShowModal(true)}
+            onClick={(e) => openCreate(e.currentTarget)}
             className="rounded-md bg-amber px-4 py-2 text-sm font-semibold text-ink shadow-[0_0_0_1px_rgba(0,0,0,0.2)] transition hover:bg-amber-bright active:translate-y-px"
           >
             + 새 앨범
@@ -83,19 +112,29 @@ export default function LibraryPage() {
         </div>
 
         {error && (
-          <p className="mb-4 rounded-md border border-rose/40 bg-rose/10 px-4 py-3 text-sm text-rose">
-            {error}
-          </p>
+          <div role="alert" className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-rose/40 bg-rose/10 px-4 py-3 text-sm text-rose">
+            <span>{error}</span>
+            <button type="button" onClick={() => { setProjects(null); setError(null); setReloadKey((current) => current + 1); }} className="rounded-md border border-rose/50 px-3 py-1.5 text-xs font-semibold hover:bg-rose/10 focus-visible:outline-2 focus-visible:outline-rose">다시 불러오기</button>
+          </div>
         )}
 
         {projects === null ? (
           <p className="py-20 text-center text-sm text-fg-dim">불러오는 중…</p>
-        ) : projects.length === 0 ? (
-          <EmptyState onCreate={() => setShowModal(true)} />
-        ) : (
+        ) : projects.length === 0 && !error ? (
+          <EmptyState onCreate={openCreate} />
+        ) : projects.length === 0 ? null : (
           <ul className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {projects.map((p) => (
-              <AlbumCard key={p.id} project={p} onDelete={handleDelete} />
+              <AlbumCard
+                key={p.id}
+                project={p}
+                onDelete={handleDelete}
+                deleting={deletingId === p.id}
+                onEdit={(button) => {
+                  editTriggerRef.current = button;
+                  setEditingProject(p);
+                }}
+              />
             ))}
           </ul>
         )}
@@ -103,10 +142,20 @@ export default function LibraryPage() {
 
       {showModal && (
         <NewAlbumModal
-          onClose={() => setShowModal(false)}
+          onClose={closeCreate}
           onCreated={(project) => {
             setShowModal(false);
             router.push(`/album/${project.id}/tracks`);
+          }}
+        />
+      )}
+      {editingProject && (
+        <EditAlbumModal
+          project={editingProject}
+          onClose={closeEdit}
+          onSaved={(updated) => {
+            setProjects((cur) => cur?.map((p) => (p.id === updated.id ? updated : p)) ?? cur);
+            closeEdit();
           }}
         />
       )}
@@ -117,9 +166,13 @@ export default function LibraryPage() {
 function AlbumCard({
   project,
   onDelete,
+  deleting,
+  onEdit,
 }: {
   project: AlbumProject;
   onDelete: (id: string, title: string) => void;
+  deleting: boolean;
+  onEdit: (button: HTMLButtonElement) => void;
 }) {
   const trackCount = project.tracks.length;
   const total = totalDurationSec(project.tracks);
@@ -144,22 +197,191 @@ function AlbumCard({
             month: "2-digit",
             day: "2-digit",
           })}{" "}
-          수정
+          업데이트
         </p>
       </Link>
-      <button
-        onClick={() => onDelete(project.id, project.title)}
-        aria-label="앨범 삭제"
-        title="앨범 삭제"
-        className="absolute right-3 top-3 hidden rounded-md border border-line-strong bg-ink/70 p-1.5 text-fg-muted opacity-0 transition hover:border-rose/60 hover:text-rose group-hover:flex group-hover:opacity-100"
-      >
-        <TrashIcon />
-      </button>
+      <div className="flex items-center justify-between border-t border-line/70 px-5 py-2.5">
+        <button
+          type="button"
+          onClick={(e) => onEdit(e.currentTarget)}
+          aria-label={`${project.title} 앨범 정보 수정`}
+          className="rounded-md px-2 py-1 text-sm font-medium text-amber transition hover:bg-amber/10 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber"
+        >
+          앨범 정보 수정
+        </button>
+        <button
+          type="button"
+          onClick={() => onDelete(project.id, project.title)}
+          disabled={deleting}
+          aria-label={`${project.title} 앨범 삭제`}
+          className="inline-flex min-h-9 items-center gap-1.5 rounded-md px-2 py-1 text-xs text-fg-muted transition hover:bg-rose/10 hover:text-rose focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose disabled:opacity-40"
+        >
+          <TrashIcon /> {deleting ? "삭제 중…" : "삭제"}
+        </button>
+      </div>
     </li>
   );
 }
 
-function EmptyState({ onCreate }: { onCreate: () => void }) {
+function EditAlbumModal({
+  project,
+  onClose,
+  onSaved,
+}: {
+  project: AlbumProject;
+  onClose: () => void;
+  onSaved: (updated: AlbumProject) => void;
+}) {
+  const [title, setTitle] = useState(project.title);
+  const [artist, setArtist] = useState(project.artist);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const titleRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    titleRef.current?.focus();
+  }, []);
+
+  function handleKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      if (!busy) onClose();
+      return;
+    }
+    if (e.key !== "Tab") return;
+    if (busy) {
+      e.preventDefault();
+      dialogRef.current?.focus();
+      return;
+    }
+    const buttons = dialogRef.current?.querySelectorAll<HTMLElement>(
+      'input:not(:disabled), button:not(:disabled)',
+    );
+    if (!buttons?.length) return;
+    const first = buttons[0];
+    const last = buttons[buttons.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (busy) return;
+    const nextTitle = title.trim();
+    const nextArtist = artist.trim();
+    if (!nextTitle || !nextArtist) {
+      setErr("앨범 제목과 아티스트를 모두 입력해 주세요.");
+      return;
+    }
+    if (nextTitle.length > 500 || nextArtist.length > 500) {
+      setErr("앨범 제목과 아티스트는 각각 500자 이하여야 합니다.");
+      return;
+    }
+    if (nextTitle === project.title && nextArtist === project.artist) {
+      onClose();
+      return;
+    }
+    setBusy(true);
+    setErr(null);
+    dialogRef.current?.focus();
+    try {
+      const res = await fetch(`/api/projects/${project.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: nextTitle, artist: nextArtist }),
+      });
+      const data = (await res.json().catch(() => null)) as
+        | AlbumProject
+        | { error?: string }
+        | null;
+      if (!res.ok) {
+        const message = data && "error" in data ? data.error : undefined;
+        throw new Error(message || "앨범 정보 저장에 실패했습니다.");
+      }
+      if (!data || !("id" in data)) throw new Error("저장 결과를 확인할 수 없습니다.");
+      onSaved(data);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "알 수 없는 오류");
+      setBusy(false);
+      requestAnimationFrame(() => titleRef.current?.focus());
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+      onClick={(e) => {
+        if (e.target === e.currentTarget && !busy) onClose();
+      }}
+    >
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="edit-album-heading"
+        aria-busy={busy}
+        tabIndex={-1}
+        onKeyDown={handleKeyDown}
+        className="max-h-[calc(100dvh-2rem)] w-full max-w-md overflow-y-auto rounded-2xl border border-line-strong bg-panel p-6 shadow-2xl focus:outline-none"
+      >
+        <form onSubmit={submit}>
+          <h2 id="edit-album-heading" className="text-lg font-semibold text-fg">앨범 정보 수정</h2>
+          <p className="mt-1 text-sm text-fg-muted">앨범 제목과 아티스트를 수정합니다.</p>
+
+          <label className="mt-5 block">
+            <span className="mb-1.5 block text-xs font-medium text-fg-muted">앨범 제목</span>
+            <input
+              ref={titleRef}
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              disabled={busy}
+              maxLength={500}
+              className="w-full rounded-lg border border-line bg-ink px-3 py-2.5 text-sm text-fg outline-none transition focus:border-amber focus:ring-1 focus:ring-amber/50 disabled:opacity-50"
+            />
+          </label>
+          <label className="mt-4 block">
+            <span className="mb-1.5 block text-xs font-medium text-fg-muted">아티스트</span>
+            <input
+              value={artist}
+              onChange={(e) => setArtist(e.target.value)}
+              disabled={busy}
+              maxLength={500}
+              className="w-full rounded-lg border border-line bg-ink px-3 py-2.5 text-sm text-fg outline-none transition focus:border-amber focus:ring-1 focus:ring-amber/50 disabled:opacity-50"
+            />
+          </label>
+
+          {err && <p role="alert" className="mt-3 text-sm text-rose">{err}</p>}
+
+          <div className="mt-6 flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={busy}
+              className="rounded-md px-4 py-2 text-sm font-medium text-fg-muted transition hover:text-fg disabled:opacity-50"
+            >
+              취소
+            </button>
+            <button
+              type="submit"
+              disabled={busy}
+              className="rounded-md bg-amber px-4 py-2 text-sm font-semibold text-ink transition hover:bg-amber-bright disabled:opacity-50"
+            >
+              {busy ? "저장 중…" : "저장"}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function EmptyState({ onCreate }: { onCreate: (button: HTMLButtonElement) => void }) {
   return (
     <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-line-strong bg-panel/40 px-6 py-20 text-center">
       <DiscMark large />
@@ -168,7 +390,7 @@ function EmptyState({ onCreate }: { onCreate: () => void }) {
         음원을 추출해 오디오 CD로 굽고 앨범 아트를 만드는 첫 앨범을 시작해 보세요.
       </p>
       <button
-        onClick={onCreate}
+        onClick={(e) => onCreate(e.currentTarget)}
         className="mt-6 rounded-md bg-amber px-4 py-2 text-sm font-semibold text-ink transition hover:bg-amber-bright"
       >
         + 새 앨범 만들기
@@ -188,6 +410,39 @@ function NewAlbumModal({
   const [artist, setArtist] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const dialogRef = useRef<HTMLFormElement>(null);
+  const titleRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    titleRef.current?.focus();
+  }, []);
+
+  function handleKeyDown(e: React.KeyboardEvent<HTMLFormElement>) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      if (!busy) onClose();
+      return;
+    }
+    if (e.key !== "Tab") return;
+    if (busy) {
+      e.preventDefault();
+      dialogRef.current?.focus();
+      return;
+    }
+    const controls = dialogRef.current?.querySelectorAll<HTMLElement>(
+      'input:not(:disabled), button:not(:disabled)',
+    );
+    if (!controls?.length) return;
+    const first = controls[0];
+    const last = controls[controls.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -200,25 +455,40 @@ function NewAlbumModal({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title: title.trim(), artist: artist.trim() }),
       });
-      if (!res.ok) throw new Error("앨범 생성에 실패했습니다.");
-      onCreated((await res.json()) as AlbumProject);
+      const data = (await res.json().catch(() => null)) as AlbumProject | { error?: string } | null;
+      if (!res.ok) {
+        const message = data && "error" in data ? data.error : undefined;
+        throw new Error(message || "앨범 생성에 실패했습니다.");
+      }
+      if (!data || !("id" in data)) throw new Error("생성 결과를 확인할 수 없습니다.");
+      onCreated(data);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "알 수 없는 오류");
       setBusy(false);
+      requestAnimationFrame(() => titleRef.current?.focus());
     }
   }
 
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
-      onClick={onClose}
+      onClick={(e) => {
+        if (e.target === e.currentTarget && !busy) onClose();
+      }}
     >
       <form
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="new-album-heading"
+        aria-busy={busy}
+        tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
+        onKeyDown={handleKeyDown}
         onSubmit={submit}
-        className="w-full max-w-md rounded-2xl border border-line-strong bg-panel p-6 shadow-2xl"
+        className="max-h-[calc(100dvh-2rem)] w-full max-w-md overflow-y-auto rounded-2xl border border-line-strong bg-panel p-6 shadow-2xl focus:outline-none"
       >
-        <h2 className="text-lg font-semibold text-fg">새 앨범</h2>
+        <h2 id="new-album-heading" className="text-lg font-semibold text-fg">새 앨범</h2>
         <p className="mt-1 text-sm text-fg-muted">
           제목과 아티스트를 입력하면 트랙 추출 화면으로 이동합니다.
         </p>
@@ -228,9 +498,11 @@ function NewAlbumModal({
             앨범 제목
           </span>
           <input
-            autoFocus
+            ref={titleRef}
             value={title}
             onChange={(e) => setTitle(e.target.value)}
+            disabled={busy}
+            maxLength={500}
             placeholder="예: Midnight Sessions"
             className="w-full rounded-lg border border-line bg-ink px-3 py-2.5 text-sm text-fg outline-none transition placeholder:text-fg-dim focus:border-amber focus:ring-1 focus:ring-amber/50"
           />
@@ -243,18 +515,21 @@ function NewAlbumModal({
           <input
             value={artist}
             onChange={(e) => setArtist(e.target.value)}
+            disabled={busy}
+            maxLength={500}
             placeholder="예: Various Artists"
             className="w-full rounded-lg border border-line bg-ink px-3 py-2.5 text-sm text-fg outline-none transition placeholder:text-fg-dim focus:border-amber focus:ring-1 focus:ring-amber/50"
           />
         </label>
 
-        {err && <p className="mt-3 text-sm text-rose">{err}</p>}
+        {err && <p role="alert" className="mt-3 text-sm text-rose">{err}</p>}
 
         <div className="mt-6 flex justify-end gap-2">
           <button
             type="button"
             onClick={onClose}
-            className="rounded-md px-4 py-2 text-sm font-medium text-fg-muted transition hover:text-fg"
+            disabled={busy}
+            className="rounded-md px-4 py-2 text-sm font-medium text-fg-muted transition hover:text-fg disabled:opacity-50"
           >
             취소
           </button>

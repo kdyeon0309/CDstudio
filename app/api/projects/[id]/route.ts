@@ -1,5 +1,5 @@
-import { deleteProject, getProject, updateProjectWith } from "@/lib/storage";
-import { rejectCrossOrigin } from "@/lib/server-guards";
+import { deleteProject, getProject, updateProjectWith, withProjectLock } from "@/lib/storage";
+import { acquireJobLock, rejectCrossOrigin, releaseJobLock } from "@/lib/server-guards";
 import { isAllowedSourceUrl } from "@/lib/audio";
 import type {
   AlbumProject,
@@ -53,6 +53,7 @@ const MAX_TRACKS = 200;
 const MAX_TEXT = 500;
 
 class ValidationError extends Error {}
+class StaleProjectError extends Error {}
 
 function fail(message: string): never {
   throw new ValidationError(message);
@@ -394,12 +395,50 @@ export async function PATCH(request: Request, { params }: Ctx) {
     throw err;
   }
 
-  // 최신 상태를 읽어 병합 (미리 읽어둔 객체를 덮어쓰지 않는다)
-  const updated = await updateProjectWith(id, (project) => ({ ...project, ...patch }));
-  if (!updated) {
-    return Response.json({ error: "앨범을 찾을 수 없습니다." }, { status: 404 });
+  const patchesTracks = patch.tracks !== undefined;
+  const expectedUpdatedAt = request.headers.get("X-CDstudio-Updated-At")?.trim();
+  if (patchesTracks && !expectedUpdatedAt) {
+    return Response.json(
+      { error: "트랙 변경에는 최신 프로젝트 버전이 필요합니다." },
+      { status: 428 },
+    );
   }
-  return Response.json(updated);
+
+  // 트랙 추출과 전체 tracks 배열 PATCH가 교차하면 새 트랙이 유실될 수 있으므로
+  // 동일 작업 락으로 직렬화한다. 다른 필드 PATCH는 기존 동작을 유지한다.
+  const extractLockKey = `extract:${id}`;
+  const extractLockToken = patchesTracks ? acquireJobLock(extractLockKey) : null;
+  if (patchesTracks && !extractLockToken) {
+    return Response.json(
+      { error: "이 앨범은 추출 중입니다. 완료 후 최신 트랙 목록에서 다시 시도해 주세요." },
+      { status: 409 },
+    );
+  }
+
+  try {
+    // 최신 상태를 읽은 같은 저장 락 안에서 버전을 비교한다. 불일치 시 mutate가
+    // 예외를 던지므로 오래된 tracks 배열은 저장되지 않고 updatedAt도 바뀌지 않는다.
+    const updated = await updateProjectWith(id, (project) => {
+      if (patchesTracks && project.updatedAt !== expectedUpdatedAt) {
+        throw new StaleProjectError();
+      }
+      return { ...project, ...patch };
+    });
+    if (!updated) {
+      return Response.json({ error: "앨범을 찾을 수 없습니다." }, { status: 404 });
+    }
+    return Response.json(updated);
+  } catch (error) {
+    if (error instanceof StaleProjectError) {
+      return Response.json(
+        { error: "트랙 목록이 다른 작업으로 변경되었습니다. 최신 목록을 다시 불러와 주세요." },
+        { status: 409 },
+      );
+    }
+    throw error;
+  } finally {
+    if (extractLockToken) releaseJobLock(extractLockKey, extractLockToken);
+  }
 }
 
 // DELETE /api/projects/[id] → { ok: true }
@@ -408,9 +447,22 @@ export async function DELETE(request: Request, { params }: Ctx) {
   if (crossOrigin) return crossOrigin;
 
   const { id } = await params;
-  const ok = await deleteProject(id);
-  if (!ok) {
-    return Response.json({ error: "앨범을 찾을 수 없습니다." }, { status: 404 });
+  const keys = [`design:${id}`, `extract:${id}`, "burn:drive"];
+  const held: { key: string; token: string }[] = [];
+  try {
+    for (const key of keys) {
+      const token = acquireJobLock(key);
+      if (!token) {
+        return Response.json({ error: "진행 중인 작업이 끝난 뒤 앨범을 삭제할 수 있습니다." }, { status: 409 });
+      }
+      held.push({ key, token });
+    }
+    const ok = await withProjectLock(id, () => deleteProject(id));
+    if (!ok) {
+      return Response.json({ error: "앨범을 찾을 수 없습니다." }, { status: 404 });
+    }
+    return Response.json({ ok: true });
+  } finally {
+    for (const { key, token } of held.reverse()) releaseJobLock(key, token);
   }
-  return Response.json({ ok: true });
 }

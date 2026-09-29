@@ -10,6 +10,8 @@ import type {
   PartTransform,
 } from "@/lib/types";
 import { ARTWORK_PARTS, PART_LABELS, PRINT_SPECS } from "@/lib/types";
+import ArtworkSheetPreview from "@/components/ArtworkSheetPreview";
+import { selectedStudioCandidate, selectedStudioParts, studioPart, studioPrintEnabled, studioPrintResolution, studioSpineNeedsBack } from "@/lib/studio-view";
 import styles from "./print.module.css";
 
 /** 미세조정 범위 — lib/types.ts 의 PartTransform 주석 및 서버 PATCH 검증과 동일 */
@@ -88,7 +90,7 @@ function partNote(part: ArtworkPart) {
     return `Ø${spec.outerDiameterMm}mm · 내경 Ø${spec.innerDiameterMm}mm`;
   }
   const spec = PRINT_SPECS[part];
-  const spine = "spineMm" in spec ? ` · 스파인 ${spec.spineMm}mm` : "";
+  const spine = "spineMm" in spec ? ` · 스파인 ${spec.spineMm}mm · 점선은 미리보기용, 인쇄 시 위쪽 표식만 표시` : "";
   return `${spec.widthMm}×${spec.heightMm}mm${spine}`;
 }
 
@@ -454,6 +456,76 @@ function ArtworkPage({
   );
 }
 
+function StudioPrint({ project }: { project: AlbumProject }) {
+  const printableParts = selectedStudioParts(project);
+  const spineCandidate = selectedStudioCandidate(project, "back-spine");
+  const [overflowByPart, setOverflowByPart] = useState<Partial<Record<ArtworkPart, boolean>>>({});
+  const unverifiedOverlay = printableParts.some((part) =>
+    (studioPart(project, part).presentation.overlay.enabled ||
+      (part === "back" && spineCandidate && studioPart(project, "back-spine").presentation.overlay.enabled)) &&
+    overflowByPart[part] === undefined,
+  );
+  const overflowingParts = printableParts.filter((part) => overflowByPart[part]);
+  if (studioSpineNeedsBack(project)) {
+    return (
+      <section className="mx-auto max-w-xl rounded-2xl border border-line bg-panel p-8 text-center">
+        <h2 className="text-xl font-semibold text-fg">뒷표지 중앙 이미지가 필요합니다</h2>
+        <p className="mt-2 text-sm text-fg-muted">선택한 스파인은 뒷표지 중앙과 함께 한 장의 트레이카드로 인쇄됩니다. 디자인 스튜디오에서 뒷표지 후보를 확정해 주세요.</p>
+        <Link href={`/album/${encodeURIComponent(project.id)}/design`} className="mt-5 inline-flex rounded-lg bg-amber px-4 py-2 text-sm font-semibold text-ink">디자인 스튜디오로 이동</Link>
+      </section>
+    );
+  }
+  if (printableParts.length === 0) {
+    return (
+      <section className="mx-auto max-w-xl rounded-2xl border border-line bg-panel p-8 text-center">
+        <h2 className="text-xl font-semibold text-fg">인쇄할 영역을 먼저 확정하세요</h2>
+        <p className="mt-2 text-sm text-fg-muted">디자인 스튜디오에서 생성 후보를 확인하고 ‘이 후보 사용’을 누르세요.</p>
+        <Link href={`/album/${encodeURIComponent(project.id)}/design`} className="mt-5 inline-flex rounded-lg bg-amber px-4 py-2 text-sm font-semibold text-ink">디자인 스튜디오로 이동</Link>
+      </section>
+    );
+  }
+
+  return (
+    <div className={styles.printRoot}>
+      <header className={`${styles.screenOnly} mb-8 flex flex-wrap items-end justify-between gap-5`}>
+        <div>
+          <p className="font-mono text-xs uppercase tracking-[0.18em] text-amber">③ 실치수 인쇄</p>
+          <h2 className="mt-2 text-2xl font-semibold text-fg">영역별 디자인 인쇄</h2>
+          <p className="mt-1 text-sm text-fg-muted">A4, 배율 100%로 인쇄하세요. 선택한 {printableParts.length}개 영역이 각각 한 장에 배치됩니다.</p>
+          <Link href={`/album/${encodeURIComponent(project.id)}/design`} className="mt-2 inline-flex text-xs text-amber hover:underline">디자인 스튜디오에서 배치 조정 →</Link>
+        </div>
+        <button type="button" disabled={unverifiedOverlay || overflowingParts.length > 0} onClick={() => window.print()} className="rounded-xl bg-amber px-5 py-3 text-sm font-bold text-ink disabled:cursor-not-allowed disabled:opacity-40">인쇄 (PDF 저장)</button>
+      </header>
+      {overflowingParts.length > 0 && <p role="alert" className={`${styles.screenOnly} mb-4 rounded-lg border border-rose/40 bg-rose/10 p-3 text-xs text-rose`}>{overflowingParts.map((part) => PART_LABELS[part]).join(", ")} 글자가 인쇄 영역을 벗어납니다. 디자인 스튜디오에서 글자 크기를 줄이거나 글자를 끄세요.</p>}
+      <p className={`${styles.screenOnly} mb-3 text-xs text-fg-dim`}>PPI는 원본 픽셀과 인쇄 크기로 추정한 값입니다. 이미지 전체 보기는 흐린 배경도 고려합니다. 300PPI 미달 경고가 있어도 인쇄할 수 있습니다.</p>
+      <div className={styles.preview}>
+        {printableParts.map((part, index) => {
+          const candidate = selectedStudioCandidate(project, part);
+          if (!candidate) return null;
+          const resolution = studioPrintResolution(candidate, part, studioPart(project, part).presentation, part === "back" && Boolean(spineCandidate));
+          const spineResolution = part === "back" && spineCandidate
+            ? studioPrintResolution(spineCandidate, "back-spine", studioPart(project, "back-spine").presentation) : null;
+          return (
+            <div key={part} className={styles.sheetBlock}>
+              <div className={`${styles.controlBar} ${styles.screenOnly}`}>
+                <span className="text-sm font-semibold text-fg">{PART_LABELS[part]}</span>
+                <span className="ml-3 font-mono text-xs text-fg-dim">{partNote(part)}</span>
+                <span className={`ml-3 text-xs ${resolution.grade === "target" ? "text-fg-dim" : "text-amber"}`}>인쇄 이미지 {resolution.widthPx}×{resolution.heightPx}px · 약 {resolution.ppi}PPI{resolution.grade !== "target" ? ` · 300PPI 목표 미달${resolution.grade === "low" ? " (저해상도)" : ""}` : " · 목표 충족"}</span>
+              </div>
+              {!resolution.fullBleed && <p role="alert" className={`${styles.screenOnly} mb-2 text-xs text-amber`}>여백 가능: 현재 축소·이동 설정으로 이미지가 인쇄 영역을 끝까지 채우지 못할 수 있습니다.</p>}
+              {spineResolution && <p className={`${styles.screenOnly} mb-2 text-xs ${spineResolution.grade === "target" ? "text-fg-dim" : "text-amber"}`}>선택한 스파인 인쇄 이미지 {spineResolution.widthPx}×{spineResolution.heightPx}px · 6.5×118mm · 약 {spineResolution.ppi}PPI{spineResolution.grade !== "target" ? ` · 300PPI 목표 미달${spineResolution.grade === "low" ? " (저해상도)" : ""}` : " · 목표 충족"}</p>}
+              {spineResolution && !spineResolution.fullBleed && <p role="alert" className={`${styles.screenOnly} mb-2 text-xs text-amber`}>선택한 스파인 여백 가능: 스파인 배치를 확인하세요.</p>}
+              <div className={styles.scaledSheet}>
+                <ArtworkSheetPreview project={project} part={part} candidate={candidate} presentation={studioPart(project, part).presentation} spineCandidate={part === "back" ? spineCandidate : undefined} spinePresentation={part === "back" && spineCandidate ? studioPart(project, "back-spine").presentation : undefined} last={index === printableParts.length - 1} onOverflow={(overflow) => setOverflowByPart((current) => current[part] === overflow ? current : { ...current, [part]: overflow })} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export default function PrintClient({ projectId }: { projectId: string }) {
   const [project, setProject] = useState<AlbumProject | null>(null);
   const [loading, setLoading] = useState(true);
@@ -628,6 +700,8 @@ export default function PrintClient({ projectId }: { projectId: string }) {
     );
   }
 
+  if (studioPrintEnabled(project)) return <StudioPrint project={project} />;
+
   const printableParts = ARTWORK_PARTS.filter((part) => selectedVariant?.files[part]);
   const hasPrintablePart = printableParts.length > 0;
   const lastPrintablePart = printableParts[printableParts.length - 1];
@@ -636,7 +710,7 @@ export default function PrintClient({ projectId }: { projectId: string }) {
     return (
       <section className="mx-auto max-w-xl rounded-2xl border border-line bg-panel p-8 text-center shadow-2xl">
         <p className="font-mono text-xs uppercase tracking-[0.18em] text-amber">
-          5단계 · 실치수 인쇄
+          ③ 실치수 인쇄
         </p>
         <h2 className="mt-3 text-xl font-semibold text-fg">
           먼저 디자인 단계에서 아트워크를 생성·선택하세요
@@ -680,7 +754,7 @@ export default function PrintClient({ projectId }: { projectId: string }) {
       <header className={`${styles.screenOnly} mb-8 flex flex-wrap items-end justify-between gap-5`}>
         <div>
           <p className="font-mono text-xs uppercase tracking-[0.18em] text-violet-400">
-            5단계 · 실치수 인쇄
+            ③ 실치수 인쇄
           </p>
           <h2 className="mt-2 text-2xl font-semibold text-fg">인쇄 미리보기</h2>
           <p className="mt-1 text-sm text-fg-muted">

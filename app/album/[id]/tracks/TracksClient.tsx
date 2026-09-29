@@ -9,10 +9,17 @@ import type {
   Track,
 } from "@/lib/types";
 import {
+  DEFAULT_BURN_PREGAP_SEC,
+  discOccupancySec,
   MAX_AUDIO_MINUTES,
+  MAX_BURN_TRACKS,
   formatDuration,
   totalDurationSec,
 } from "@/lib/types";
+import {
+  initialExtractSelection,
+  MAX_EXTRACT_ITEMS,
+} from "@/lib/extract-contract";
 
 const WARN_SECONDS = 74 * 60; // 74분 경고
 const MAX_SECONDS = MAX_AUDIO_MINUTES * 60; // 79분 초과 차단
@@ -25,6 +32,7 @@ interface InProgress {
   title: string;
   phase: "download" | "convert";
   percent: number;
+  retry?: { attempt: number; maxAttempts: number };
   error?: string;
 }
 
@@ -71,9 +79,11 @@ export default function TracksClient({ projectId }: { projectId: string }) {
           setProject(data);
           setTracks([...data.tracks].sort((a, b) => a.order - b.order));
           setLoadError(null);
+          return true;
         })
         .catch((err: unknown) => {
           setLoadError(err instanceof Error ? err.message : String(err));
+          return false;
         }),
     [projectId],
   );
@@ -93,6 +103,7 @@ export default function TracksClient({ projectId }: { projectId: string }) {
     if (!trimmed) return;
     setProbing(true);
     setProbeError(null);
+    setExtractError(null);
     setProbeResult(null);
     try {
       const res = await fetch("/api/extract/probe", {
@@ -104,7 +115,12 @@ export default function TracksClient({ projectId }: { projectId: string }) {
       if (!res.ok) throw new Error(data?.error ?? `조회 실패 (${res.status})`);
       const result = data as ProbeResultView;
       setProbeResult(result);
-      setSelected(result.items.map(() => true)); // 기본 전체 선택
+      setSelected(initialExtractSelection(result.items.length));
+      if (result.items.length > MAX_EXTRACT_ITEMS) {
+        setExtractError(
+          `한 번에 최대 ${MAX_EXTRACT_ITEMS}곡까지 추출할 수 있어 앞의 ${MAX_EXTRACT_ITEMS}곡만 선택했습니다.`,
+        );
+      }
     } catch (err) {
       setProbeError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -113,10 +129,22 @@ export default function TracksClient({ projectId }: { projectId: string }) {
   }
 
   function toggleSelect(idx: number) {
+    if (!selected[idx] && selected.filter(Boolean).length >= MAX_EXTRACT_ITEMS) {
+      setExtractError(`한 번에 최대 ${MAX_EXTRACT_ITEMS}곡까지 선택할 수 있습니다.`);
+      return;
+    }
+    setExtractError(null);
     setSelected((prev) => prev.map((v, i) => (i === idx ? !v : v)));
   }
   function setAllSelected(value: boolean) {
-    setSelected((prev) => prev.map(() => value));
+    setSelected((prev) =>
+      prev.map((_, index) => value && index < MAX_EXTRACT_ITEMS),
+    );
+    setExtractError(
+      value && (probeResult?.items.length ?? 0) > MAX_EXTRACT_ITEMS
+        ? `한 번에 최대 ${MAX_EXTRACT_ITEMS}곡까지만 선택했습니다.`
+        : null,
+    );
   }
 
   // ── 추출 시작 (SSE) ───────────────────────────────────────
@@ -125,6 +153,14 @@ export default function TracksClient({ projectId }: { projectId: string }) {
     const items: ProbeItem[] = probeResult.items.filter((_, i) => selected[i]);
     if (items.length === 0) {
       setExtractError("선택된 곡이 없습니다");
+      return;
+    }
+    if (items.length > MAX_EXTRACT_ITEMS) {
+      setExtractError(`한 번에 최대 ${MAX_EXTRACT_ITEMS}곡까지 추출할 수 있습니다.`);
+      return;
+    }
+    if (saving || editingTrackId) {
+      setExtractError("트랙 변경 저장을 마친 뒤 추출을 시작해 주세요.");
       return;
     }
     setExtracting(true);
@@ -195,14 +231,34 @@ export default function TracksClient({ projectId }: { projectId: string }) {
       case "track-start":
         setInProgress((prev) => [
           ...prev.filter((p) => p.trackId !== event.trackId),
-          { trackId: event.trackId, title: event.title, phase: "download", percent: 0 },
+          {
+            trackId: event.trackId,
+            title: event.title,
+            phase: "download",
+            percent: 0,
+          },
         ]);
         break;
       case "progress":
         setInProgress((prev) =>
           prev.map((p) =>
             p.trackId === event.trackId
-              ? { ...p, phase: event.phase, percent: event.percent }
+              ? { ...p, phase: event.phase, percent: event.percent, retry: undefined }
+              : p,
+          ),
+        );
+        break;
+      case "track-retry":
+        setInProgress((prev) =>
+          prev.map((p) =>
+            p.trackId === event.trackId
+              ? {
+                  ...p,
+                  phase: "download",
+                  percent: 0,
+                  retry: { attempt: event.attempt, maxAttempts: event.maxAttempts },
+                  error: undefined,
+                }
               : p,
           ),
         );
@@ -218,7 +274,9 @@ export default function TracksClient({ projectId }: { projectId: string }) {
       case "track-error":
         setInProgress((prev) =>
           prev.map((p) =>
-            p.trackId === event.trackId ? { ...p, error: event.message } : p,
+            p.trackId === event.trackId
+              ? { ...p, retry: undefined, error: event.message }
+              : p,
           ),
         );
         break;
@@ -234,13 +292,21 @@ export default function TracksClient({ projectId }: { projectId: string }) {
 
   function handleStop() {
     abortRef.current?.abort();
+    setInProgress([]);
+    setExtractError("추출을 중단했습니다.");
   }
 
   // ── 트랙 편집 (이름/순서/삭제) ───────────────────────────
   /** 저장 실패 시 이전 상태로 롤백하고 한국어 오류를 표시한다 (재시도 가능) */
   async function persistTracks(next: Track[]) {
-    if (saving) return;
+    if (saving || extracting) return;
     const previous = tracks;
+    const expectedUpdatedAt = project?.updatedAt;
+    if (!expectedUpdatedAt) {
+      setSaveError("프로젝트 최신 버전을 확인할 수 없어 변경을 저장하지 않았습니다.");
+      void loadProject();
+      return;
+    }
     // order 필드만 재부여 (파일명 NN prefix 는 굽기 시점 기준이므로 유지)
     const renumbered = next.map((t, i) => ({ ...t, order: i + 1 }));
     setTracks(renumbered);
@@ -250,7 +316,10 @@ export default function TracksClient({ projectId }: { projectId: string }) {
     try {
       const res = await fetch(`/api/projects/${projectId}`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-CDstudio-Updated-At": expectedUpdatedAt,
+        },
         body: JSON.stringify({ tracks: renumbered }),
       });
       const data: unknown = await res.json().catch(() => null);
@@ -259,6 +328,17 @@ export default function TracksClient({ projectId }: { projectId: string }) {
           data && typeof data === "object" && "error" in data
             ? String((data as { error: unknown }).error)
             : `HTTP ${res.status}`;
+        if (res.status === 409 || res.status === 428) {
+          setPendingTracks(null);
+          setTracks(previous);
+          const refreshed = await loadProject();
+          setSaveError(
+            refreshed
+              ? `다른 작업으로 트랙 목록이 변경되어 최신 목록을 다시 불러왔습니다: ${detail}`
+              : `다른 작업으로 트랙 목록이 변경되었지만 최신 목록을 불러오지 못했습니다: ${detail}`,
+          );
+          return;
+        }
         throw new Error(detail);
       }
       const saved = data as AlbumProject;
@@ -277,7 +357,7 @@ export default function TracksClient({ projectId }: { projectId: string }) {
 
   /** 마지막으로 실패한 변경을 다시 시도 */
   function retrySave() {
-    if (!pendingTracks) return;
+    if (!pendingTracks || extracting) return;
     const next = pendingTracks;
     setPendingTracks(null);
     void persistTracks(next);
@@ -297,7 +377,7 @@ export default function TracksClient({ projectId }: { projectId: string }) {
   }
 
   function startTitleEdit(track: Track) {
-    if (saving) return;
+    if (saving || extracting) return;
     setEditingTrackId(track.id);
     setTitleDraft(track.title);
     setTitleError(null);
@@ -310,7 +390,7 @@ export default function TracksClient({ projectId }: { projectId: string }) {
   }
 
   function saveTitle(trackId: string) {
-    if (saving || editingTrackId !== trackId) return;
+    if (saving || extracting || editingTrackId !== trackId) return;
     const title = titleDraft.trim();
     if (!title) {
       setTitleError("트랙 제목을 입력해 주세요.");
@@ -336,7 +416,7 @@ export default function TracksClient({ projectId }: { projectId: string }) {
     event: React.DragEvent<HTMLLIElement>,
     trackId: string,
   ) {
-    if (saving || editingTrackId || dragIntentRef.current !== trackId) {
+    if (saving || extracting || editingTrackId || dragIntentRef.current !== trackId) {
       event.preventDefault();
       return;
     }
@@ -350,7 +430,7 @@ export default function TracksClient({ projectId }: { projectId: string }) {
     event: React.DragEvent<HTMLLIElement>,
     trackId: string,
   ) {
-    if (!draggedTrackId || draggedTrackId === trackId || saving) return;
+    if (!draggedTrackId || draggedTrackId === trackId || saving || extracting) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = "move";
     const rect = event.currentTarget.getBoundingClientRect();
@@ -379,7 +459,7 @@ export default function TracksClient({ projectId }: { projectId: string }) {
     const position =
       dropTarget?.trackId === targetTrackId ? dropTarget.position : "before";
     resetDragState();
-    if (!sourceTrackId || sourceTrackId === targetTrackId || saving) return;
+    if (!sourceTrackId || sourceTrackId === targetTrackId || saving || extracting) return;
 
     const source = tracks.find((track) => track.id === sourceTrackId);
     if (!source) return;
@@ -394,10 +474,20 @@ export default function TracksClient({ projectId }: { projectId: string }) {
   }
 
   // ── 총 러닝타임 상태 ──────────────────────────────────────
-  const total = totalDurationSec(tracks);
-  const overLimit = total > MAX_SECONDS;
-  const warnLimit = total > WARN_SECONDS && !overLimit;
-  const totalClass = overLimit
+  const audioTotal = totalDurationSec(tracks);
+  const savedPregapSec = project?.burnSettings?.pregapSec;
+  const pregapSec =
+    typeof savedPregapSec === "number" &&
+    Number.isFinite(savedPregapSec) &&
+    savedPregapSec >= 0 &&
+    savedPregapSec <= 5
+      ? savedPregapSec
+      : DEFAULT_BURN_PREGAP_SEC;
+  const discTotal = discOccupancySec(audioTotal, tracks.length, pregapSec);
+  const overDurationLimit = discTotal > MAX_SECONDS;
+  const overTrackLimit = tracks.length > MAX_BURN_TRACKS;
+  const warnLimit = discTotal > WARN_SECONDS && !overDurationLimit;
+  const discTotalClass = overDurationLimit || overTrackLimit
     ? "text-red-600 dark:text-red-400"
     : warnLimit
       ? "text-amber-600 dark:text-amber-400"
@@ -434,7 +524,13 @@ export default function TracksClient({ projectId }: { projectId: string }) {
           <input
             type="url"
             value={url}
-            onChange={(e) => setUrl(e.target.value)}
+            onChange={(e) => {
+              setUrl(e.target.value);
+              setProbeResult(null);
+              setSelected([]);
+              setProbeError(null);
+              setExtractError(null);
+            }}
             onKeyDown={(e) => e.key === "Enter" && handleProbe()}
             placeholder="https://www.youtube.com/watch?v=..."
             disabled={probing || extracting}
@@ -471,12 +567,14 @@ export default function TracksClient({ projectId }: { projectId: string }) {
               <div className="flex gap-2 text-xs">
                 <button
                   onClick={() => setAllSelected(true)}
+                  disabled={extracting}
                   className="rounded border border-zinc-300 px-2 py-1 hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
                 >
-                  전체 선택
+                  최대 {MAX_EXTRACT_ITEMS}곡 선택
                 </button>
                 <button
                   onClick={() => setAllSelected(false)}
+                  disabled={extracting}
                   className="rounded border border-zinc-300 px-2 py-1 hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
                 >
                   전체 해제
@@ -495,6 +593,14 @@ export default function TracksClient({ projectId }: { projectId: string }) {
             </p>
           )}
 
+          {probeResult.items.length > MAX_EXTRACT_ITEMS && (
+            <p className="mb-3 rounded-md border border-sky-300 bg-sky-50 px-3 py-2 text-xs text-sky-800 dark:border-sky-700/60 dark:bg-sky-950/40 dark:text-sky-300">
+              한 번에 최대 {MAX_EXTRACT_ITEMS}곡까지 추출할 수 있습니다. 현재 최대
+              수량만 선택했으며, 완료 후 선택을 바꿔 나머지 곡을 이어서 추출할 수
+              있습니다.
+            </p>
+          )}
+
           <ul className="mb-4 max-h-64 space-y-1 overflow-y-auto">
             {probeResult.items.map((item, idx) => (
               <li key={`${item.sourceUrl}-${idx}`}>
@@ -503,6 +609,7 @@ export default function TracksClient({ projectId }: { projectId: string }) {
                     type="checkbox"
                     checked={selected[idx] ?? false}
                     onChange={() => toggleSelect(idx)}
+                    disabled={extracting}
                     className="h-4 w-4"
                   />
                   <span className="flex-1 truncate">{item.title}</span>
@@ -522,7 +629,12 @@ export default function TracksClient({ projectId }: { projectId: string }) {
           <div className="flex items-center gap-3">
             <button
               onClick={handleExtract}
-              disabled={extracting || selected.every((s) => !s)}
+              disabled={
+                extracting ||
+                saving ||
+                Boolean(editingTrackId) ||
+                selected.every((s) => !s)
+              }
               className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-40"
             >
               추출 시작 ({selected.filter(Boolean).length}곡)
@@ -555,23 +667,33 @@ export default function TracksClient({ projectId }: { projectId: string }) {
                 <span className="shrink-0 text-xs text-zinc-500">
                   {p.error
                     ? "오류"
+                    : p.retry
+                      ? "재연결 중"
                     : p.phase === "download"
                       ? "다운로드"
                       : "변환"}{" "}
-                  {p.error ? "" : `${Math.round(p.percent)}%`}
+                  {p.error || p.retry ? "" : `${Math.round(p.percent)}%`}
                 </span>
               </div>
               {p.error ? (
                 <p className="text-xs text-red-600 dark:text-red-400">{p.error}</p>
               ) : (
-                <div className="h-2 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-800">
-                  <div
-                    className={`h-full rounded-full transition-all ${
-                      p.phase === "download" ? "bg-sky-500" : "bg-emerald-500"
-                    }`}
-                    style={{ width: `${Math.max(2, Math.min(100, p.percent))}%` }}
-                  />
-                </div>
+                <>
+                  {p.retry && (
+                    <p role="status" className="mb-2 text-xs text-amber-700 dark:text-amber-400">
+                      연결이 일시적으로 거부되어 다시 연결 중{" "}
+                      ({p.retry.attempt}/{p.retry.maxAttempts})
+                    </p>
+                  )}
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-800">
+                    <div
+                      className={`h-full rounded-full transition-all ${
+                        p.phase === "download" ? "bg-sky-500" : "bg-emerald-500"
+                      }`}
+                      style={{ width: `${p.retry ? 0 : Math.max(2, Math.min(100, p.percent))}%` }}
+                    />
+                  </div>
+                </>
               )}
             </div>
           ))}
@@ -583,19 +705,37 @@ export default function TracksClient({ projectId }: { projectId: string }) {
         <div className="mb-3 flex items-center justify-between">
           <h2 className="text-lg font-semibold">트랙 ({tracks.length})</h2>
           <div className="text-right text-sm">
-            <span className="text-zinc-500">총 </span>
-            <span className={`font-semibold tabular-nums ${totalClass}`}>
-              {formatDuration(total)}
-            </span>
-            {warnLimit && (
-              <span className="ml-2 text-xs text-amber-600 dark:text-amber-400">
-                74분 근접 — 곧 CD 용량 한계입니다
+            <div>
+              <span className="text-zinc-500">오디오 합계 </span>
+              <span className="font-semibold tabular-nums text-zinc-700 dark:text-zinc-300">
+                {formatDuration(audioTotal)}
               </span>
+            </div>
+            <div>
+              <span className="text-zinc-500">디스크 점유 예상 </span>
+              <span className={`font-semibold tabular-nums ${discTotalClass}`}>
+                {formatDuration(discTotal)} / {MAX_AUDIO_MINUTES}:00
+              </span>
+            </div>
+            {tracks.length > 0 && (
+              <div className="text-xs text-zinc-500">
+                첫 곡 앞 2초 + 트랙 사이 {pregapSec}초 포함
+              </div>
             )}
-            {overLimit && (
-              <span className="ml-2 text-xs font-semibold text-red-600 dark:text-red-400">
-                79분 초과 — 굽기 불가
-              </span>
+            {warnLimit && (
+              <div className="text-xs text-amber-600 dark:text-amber-400">
+                디스크 점유 74분 근접 — 곧 CD 용량 한계입니다
+              </div>
+            )}
+            {overDurationLimit && (
+              <div className="text-xs font-semibold text-red-600 dark:text-red-400">
+                디스크 점유 79분 초과 — 굽기 불가
+              </div>
+            )}
+            {overTrackLimit && (
+              <div className="text-xs font-semibold text-red-600 dark:text-red-400">
+                최대 {MAX_BURN_TRACKS}트랙 초과 — 굽기 불가
+              </div>
             )}
           </div>
         </div>
@@ -626,7 +766,7 @@ export default function TracksClient({ projectId }: { projectId: string }) {
             {tracks.map((track, idx) => (
               <li
                 key={track.id}
-                draggable={!saving && !editingTrackId}
+                draggable={!saving && !extracting && !editingTrackId}
                 onDragStart={(event) => handleDragStart(event, track.id)}
                 onDragOver={(event) => handleDragOver(event, track.id)}
                 onDrop={(event) => handleDrop(event, track.id)}
@@ -655,7 +795,7 @@ export default function TracksClient({ projectId }: { projectId: string }) {
                       );
                     }}
                     className={`shrink-0 select-none text-zinc-400 ${
-                      saving || editingTrackId
+                      saving || extracting || editingTrackId
                         ? "cursor-not-allowed opacity-30"
                         : "cursor-grab active:cursor-grabbing"
                     }`}
@@ -687,7 +827,7 @@ export default function TracksClient({ projectId }: { projectId: string }) {
                           }}
                           onBlur={() => saveTitle(track.id)}
                           maxLength={500}
-                          disabled={saving}
+                          disabled={saving || extracting}
                           autoFocus
                           aria-label={`${idx + 1}번 트랙 제목`}
                           aria-invalid={Boolean(titleError)}
@@ -710,7 +850,7 @@ export default function TracksClient({ projectId }: { projectId: string }) {
                       <button
                         type="button"
                         onClick={() => startTitleEdit(track)}
-                        disabled={saving}
+                        disabled={saving || extracting}
                         title="트랙 제목 수정"
                         className="flex max-w-full items-center gap-1 text-left text-sm font-medium hover:text-sky-600 disabled:cursor-not-allowed disabled:opacity-50 dark:hover:text-sky-400"
                       >
@@ -731,7 +871,7 @@ export default function TracksClient({ projectId }: { projectId: string }) {
                   <div className="flex shrink-0 items-center gap-1">
                     <button
                       onClick={() => moveTrack(idx, -1)}
-                      disabled={idx === 0 || saving}
+                      disabled={idx === 0 || saving || extracting}
                       aria-label={`${idx + 1}번 ${track.title} 위로`}
                       className="rounded border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-100 disabled:opacity-30 dark:border-zinc-700 dark:hover:bg-zinc-800"
                     >
@@ -739,7 +879,7 @@ export default function TracksClient({ projectId }: { projectId: string }) {
                     </button>
                     <button
                       onClick={() => moveTrack(idx, 1)}
-                      disabled={idx === tracks.length - 1 || saving}
+                      disabled={idx === tracks.length - 1 || saving || extracting}
                       aria-label={`${idx + 1}번 ${track.title} 아래로`}
                       className="rounded border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-100 disabled:opacity-30 dark:border-zinc-700 dark:hover:bg-zinc-800"
                     >
@@ -747,7 +887,7 @@ export default function TracksClient({ projectId }: { projectId: string }) {
                     </button>
                     <button
                       onClick={() => deleteTrack(idx)}
-                      disabled={saving}
+                      disabled={saving || extracting}
                       aria-label={`${idx + 1}번 ${track.title} 삭제`}
                       className="rounded border border-red-300 px-2 py-1 text-xs text-red-600 hover:bg-red-50 disabled:opacity-30 dark:border-red-800 dark:hover:bg-red-950/40"
                     >

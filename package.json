@@ -6,7 +6,10 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test:unit": "node --test tests/burn-capacity.mjs tests/burn-confirmation.mjs tests/download-retry.mjs tests/extract-contract.mjs tests/extract-duration.mjs tests/image-generation.mjs tests/studio-reference-labels.mjs tests/studio-view.mjs tests/track-patch-concurrency.mjs",
+    "setup:yt-dlp": "node scripts/install-yt-dlp.mjs",
+    "check:yt-dlp": "node scripts/install-yt-dlp.mjs --check"
   },
   "dependencies": {
     "next": "16.2.12",

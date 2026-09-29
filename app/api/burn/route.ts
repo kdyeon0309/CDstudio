@@ -11,7 +11,8 @@ import {
 } from "@/lib/burn";
 import { acquireJobLock, rejectCrossOrigin, releaseJobLock } from "@/lib/server-guards";
 import { getProject, projectDir, tracksDir, updateProjectWith } from "@/lib/storage";
-import type { BurnEvent, BurnSettings } from "@/lib/types";
+import { MAX_AUDIO_MINUTES, discOccupancySec } from "@/lib/types";
+import type { AlbumProject, BurnEvent, BurnSettings } from "@/lib/types";
 
 export const runtime = "nodejs";
 
@@ -58,6 +59,11 @@ export async function POST(request: Request) {
   const crossOrigin = rejectCrossOrigin(request);
   if (crossOrigin) return crossOrigin;
 
+  const expectedUpdatedAt = request.headers.get("X-CDstudio-Updated-At")?.trim();
+  if (!expectedUpdatedAt) {
+    return Response.json({ error: "굽기 전 최신 트랙 목록 확인이 필요합니다. 화면을 새로고침해 주세요." }, { status: 428 });
+  }
+
   let projectId: string;
   let requestedSettings: BurnSettings | undefined;
   try {
@@ -90,6 +96,37 @@ export async function POST(request: Request) {
       { status: 409 },
     );
   }
+  // 굽는 동안 같은 앨범의 추출/트랙 편집도 막아, 모달에서 확인한 순서와
+  // 실제 CUE/BIN에 쓰는 순서가 달라지지 않게 한다.
+  const tracksLockKey = `extract:${projectId}`;
+  const tracksLockToken = acquireJobLock(tracksLockKey);
+  if (!tracksLockToken) {
+    releaseJobLock(BURN_LOCK_KEY, lockToken);
+    return Response.json(
+      { error: "트랙 추출 또는 편집이 진행 중입니다. 완료 후 목록을 다시 확인해 주세요." },
+      { status: 409 },
+    );
+  }
+  let confirmedProject: AlbumProject | null;
+  try {
+    confirmedProject = await getProject(projectId);
+  } catch {
+    releaseJobLock(tracksLockKey, tracksLockToken);
+    releaseJobLock(BURN_LOCK_KEY, lockToken);
+    return Response.json({ error: "앨범 정보를 확인하지 못했습니다." }, { status: 500 });
+  }
+  if (!confirmedProject || confirmedProject.updatedAt !== expectedUpdatedAt || confirmedProject.status === "extracting") {
+    releaseJobLock(tracksLockKey, tracksLockToken);
+    releaseJobLock(BURN_LOCK_KEY, lockToken);
+    return Response.json(
+      { error: confirmedProject
+        ? confirmedProject.status === "extracting"
+          ? "트랙 추출이 진행 중입니다. 완료 후 목록을 다시 확인해 주세요."
+          : "확인한 뒤 앨범 정보가 변경되었습니다. 최신 트랙 목록을 다시 확인해 주세요."
+        : "프로젝트를 찾을 수 없습니다." },
+      { status: confirmedProject ? 409 : 404 },
+    );
+  }
 
   // H4: SSE 연결이 끊겨도 굽기 자체와 상태 저장은 계속된다.
   //     닫힌 controller에 enqueue하지 않도록 closed 플래그로 보호한다.
@@ -118,27 +155,16 @@ export async function POST(request: Request) {
 
   const runBurn = async () => {
     try {
-      const project = await getProject(projectId);
-      if (!project) {
-        send({ type: "error", message: "프로젝트를 찾을 수 없습니다." });
-        return;
-      }
+      const project = confirmedProject;
 
-      // 요청에 settings가 오면 검증된 값을 쓰고 다음 굽기 기본값으로 저장한다.
-      // 없으면 프로젝트에 저장된 설정을 그대로 사용한다.
-      let settings = project.burnSettings;
-      if (requestedSettings) {
-        settings = requestedSettings;
-        // 저장 실패는 굽기를 막지 않는다 (설정 기억만 못 할 뿐).
-        await updateProjectWith(projectId, (current) => ({
-          ...current,
-          burnSettings: requestedSettings,
-        })).catch(() => null);
-      }
+      // 사전 검증에 실패하면 프로젝트 버전을 바꾸지 않는다. 설정 저장은
+      // 물리 굽기 성공 후 상태 변경과 함께 수행한다.
+      const settings = requestedSettings ?? project.burnSettings;
 
       // B3: 클라이언트 모달만 믿지 않고 서버에서 드라이브 상태를 재확인한다.
       send({ type: "validating", message: "드라이브 상태를 확인하고 있습니다." });
-      const driveProblem = checkDriveReady(await getDriveStatus());
+      const driveStatus = await getDriveStatus();
+      const driveProblem = checkDriveReady(driveStatus);
       if (driveProblem) {
         send({ type: "error", message: driveProblem });
         return;
@@ -151,7 +177,7 @@ export async function POST(request: Request) {
       // H2: 원본 WAV 기준으로 규격·총 재생 시간(트랙 간격 포함)을 검증한다.
       //     수 GB 이미지를 만들기 전에 검증해야 헛수고를 막을 수 있다.
       send({ type: "validating", message: "WAV 규격과 총 재생 시간을 확인하고 있습니다." });
-      const failures = await validateForBurn(project, staged, settings);
+      const failures = await validateForBurn(project, staged, settings, driveStatus.writableMinutes);
       if (failures.length > 0) {
         send({ type: "error", message: failures.join("\n") });
         return;
@@ -171,6 +197,37 @@ export async function POST(request: Request) {
         return;
       }
 
+      // 실제 BIN 크기는 트랙별 CD 프레임 올림이 반영된다. 사전 ffprobe 추정치와
+      // 미세하게 다를 수 있으므로 실물 기록 전에 한 번 더 한도를 확인한다.
+      if (staging.mode === "cue") {
+        const imageAudioSec = staging.tracks.reduce((sum, track) => sum + track.frames, 0) / 75;
+        const imageDiscSec = discOccupancySec(imageAudioSec, staging.tracks.length, staging.pregapSec);
+        if (imageDiscSec > MAX_AUDIO_MINUTES * 60) {
+          send({ type: "error", message: `실제 굽기 이미지가 ${MAX_AUDIO_MINUTES}분 한도를 초과합니다.` });
+          return;
+        }
+      }
+
+      // 이미지 생성 중 공매체가 교체되었을 수 있으므로 바로 직전 상태로 재검증한다.
+      send({ type: "validating", message: "굽기 직전 디스크 용량을 다시 확인하고 있습니다." });
+      const finalDriveStatus = await getDriveStatus();
+      const finalDriveProblem = checkDriveReady(finalDriveStatus);
+      if (finalDriveProblem) {
+        send({ type: "error", message: finalDriveProblem });
+        return;
+      }
+      if (staging.mode === "cue") {
+        const imageAudioSec = staging.tracks.reduce((sum, track) => sum + track.frames, 0) / 75;
+        const imageDiscSec = discOccupancySec(imageAudioSec, staging.tracks.length, staging.pregapSec);
+        if (typeof finalDriveStatus.writableMinutes === "number"
+          && Number.isFinite(finalDriveStatus.writableMinutes)
+          && finalDriveStatus.writableMinutes >= 0
+          && imageDiscSec > finalDriveStatus.writableMinutes * 60) {
+          send({ type: "error", message: "이미지 생성 중 매체가 교체되었거나 남은 용량이 부족합니다." });
+          return;
+        }
+      }
+
       let succeeded = false;
       await burn(
         staging,
@@ -184,16 +241,22 @@ export async function POST(request: Request) {
       if (!succeeded) return;
 
       // SSE 연결 여부와 무관하게 반드시 상태를 저장한다.
-      const updated = await updateProjectWith(projectId, (current) => ({
-        ...current,
-        status: "burned",
-        burnedAt: new Date().toISOString(),
-      }));
-      if (!updated) {
-        send({ type: "error", message: "굽기는 완료됐지만 프로젝트 상태를 저장하지 못했습니다." });
-      } else {
-        send({ type: "done" });
+      try {
+        const updated = await updateProjectWith(projectId, (current) => ({
+          ...current,
+          ...(requestedSettings ? { burnSettings: requestedSettings } : {}),
+          status: "burned",
+          burnedAt: new Date().toISOString(),
+        }));
+        if (!updated) {
+          send({ type: "log", message: "경고: CD 굽기는 완료됐지만 앨범 상태 저장에 실패했습니다. 다시 굽지 말고 실물 CD를 확인해 주세요." });
+        }
+      } catch {
+        send({ type: "log", message: "경고: CD 굽기는 완료됐지만 앨범 상태 저장에 실패했습니다. 다시 굽지 말고 실물 CD를 확인해 주세요." });
       }
+      // 실물 성공은 상태 저장 성공 여부와 별개로 종료 상태다. UI에서
+      // 다시 굽기 버튼이 열려 공매체를 중복 소모하지 않도록 한다.
+      send({ type: "done" });
     } catch (error) {
       send({
         type: "error",
@@ -201,6 +264,7 @@ export async function POST(request: Request) {
       });
     } finally {
       await cleanupBurnStaging(stagingDirectory);
+      releaseJobLock(tracksLockKey, tracksLockToken);
       releaseJobLock(BURN_LOCK_KEY, lockToken);
       close();
     }

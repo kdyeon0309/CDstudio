@@ -16,9 +16,9 @@ import {
   probeDuration,
   isAllowedSourceUrl,
   assertAllowedSourceUrl,
-  MAX_EXTRACT_ITEMS,
   AbortError,
 } from "@/lib/audio";
+import { MAX_EXTRACT_ITEMS } from "@/lib/extract-contract";
 
 export const dynamic = "force-dynamic";
 
@@ -141,6 +141,8 @@ export async function POST(request: NextRequest) {
               (percent) =>
                 send({ type: "progress", trackId, phase: "download", percent }),
               signal,
+              (attempt, maxAttempts) =>
+                send({ type: "track-retry", trackId, attempt, maxAttempts }),
             );
 
             await convertToCdWav(
@@ -151,7 +153,10 @@ export async function POST(request: NextRequest) {
               signal,
             );
 
-            const durationSec = Math.round(await probeDuration(stagePath, signal));
+            const durationSec = await probeDuration(stagePath, signal);
+            if (!Number.isFinite(durationSec) || durationSec <= 0) {
+              throw new Error("변환된 오디오의 재생 시간을 확인할 수 없습니다");
+            }
 
             await fs.rm(tmpPath, { force: true });
             tmpPath = undefined;

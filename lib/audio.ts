@@ -7,10 +7,12 @@
 import { spawn } from "child_process";
 import { promises as fs } from "fs";
 import path from "path";
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import type { ProbeItem, ProbeResult } from "./types";
 
-export const YT_DLP = "/opt/homebrew/bin/yt-dlp";
+/** 앱 전용 공식 2026.08.19 zipapp. 설치: npm run setup:yt-dlp */
+export const YT_DLP = path.join(process.cwd(), ".tools", "yt-dlp");
+const YT_DLP_SHA256 = "1fa6733c37ea6fb51c99ad8fe785e7b7e5f3246c9b980230329d4fb72ed8d4d6";
 export const FFMPEG = "/opt/homebrew/bin/ffmpeg";
 export const FFPROBE = "/opt/homebrew/bin/ffprobe";
 
@@ -219,6 +221,23 @@ function run(cmd: string, args: string[], opts: RunOpts = {}): Promise<RunResult
   });
 }
 
+/** probe/download가 동일한 검증된 실행 파일을 쓰도록 요청마다 검사한다. */
+async function runYtDlp(args: string[], opts: RunOpts = {}): Promise<RunResult> {
+  if (opts.signal?.aborted) throw new AbortError();
+  let bytes: Buffer;
+  try {
+    bytes = await fs.readFile(YT_DLP);
+    await fs.access(YT_DLP, fs.constants.X_OK);
+  } catch {
+    throw new Error("앱 전용 yt-dlp가 없습니다. npm run setup:yt-dlp로 설치해 주세요.");
+  }
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  if (digest !== YT_DLP_SHA256) {
+    throw new Error("앱 전용 yt-dlp 파일 검증에 실패했습니다. npm run setup:yt-dlp로 재설치해 주세요.");
+  }
+  return run(YT_DLP, ["--ignore-config", ...args], opts);
+}
+
 // ── probe ─────────────────────────────────────────────────────
 
 interface RawEntry {
@@ -282,8 +301,7 @@ export interface ProbeResultEx extends ProbeResult {
  */
 export async function probeUrl(url: string, signal?: AbortSignal): Promise<ProbeResultEx> {
   assertAllowedSourceUrl(url);
-  const { code, stdout, stderr, stdoutTruncated } = await run(
-    YT_DLP,
+  const { code, stdout, stderr, stdoutTruncated } = await runYtDlp(
     ["--dump-single-json", "--flat-playlist", "--no-warnings", url],
     { signal, captureStdout: true, timeoutMs: PROBE_TIMEOUT_MS },
   );
@@ -320,6 +338,55 @@ export async function probeUrl(url: string, signal?: AbortSignal): Promise<Probe
 
 // ── download / convert / duration ─────────────────────────────
 
+const DOWNLOAD_MAX_ATTEMPTS = 3;
+const DOWNLOAD_RETRY_DELAYS_MS = [1_000, 3_000] as const;
+
+function isForbiddenDownload(stderr: string): boolean {
+  return /HTTP Error 403:\s*Forbidden/i.test(stderr);
+}
+
+/** yt-dlp 오류에 포함될 수 있는 서명된 미디어 URL을 사용자 메시지에서 제거한다. */
+function safeDownloadTail(stderr: string): string {
+  return tail(stderr.replace(/https?:\/\/[^\s"'<>]+/gi, "[URL]"));
+}
+
+function waitForRetry(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new AbortError());
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    function onAbort() {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      reject(new AbortError());
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/** 이 다운로드의 UUID로 시작하는 파일만 정리한다. 다른 트랙은 건드리지 않는다. */
+async function cleanupDownloadFiles(tracksDir: string, prefix: string, keep?: string) {
+  const files = await fs.readdir(tracksDir).catch(() => [] as string[]);
+  await Promise.all(
+    files
+      .filter((file) => file.startsWith(prefix) && path.join(tracksDir, file) !== keep)
+      .map((file) => fs.rm(path.join(tracksDir, file), { force: true }).catch(() => {})),
+  );
+}
+
+/** .part/.ytdl 등은 완성 음원이 아니다. */
+async function completedDownload(tracksDir: string, prefix: string): Promise<string | undefined> {
+  const files = await fs.readdir(tracksDir);
+  for (const file of files) {
+    if (!file.startsWith(prefix) || /\.(?:part|ytdl|temp|tmp)$/i.test(file)) continue;
+    const candidate = path.join(tracksDir, file);
+    const stat = await fs.lstat(candidate).catch(() => null);
+    if (stat?.isFile() && stat.size > 0) return candidate;
+  }
+}
+
 /**
  * 최고 음질 오디오를 tracksDir 아래 임시 파일로 내려받는다.
  * @returns 내려받은 임시 파일의 절대 경로
@@ -329,38 +396,64 @@ export async function downloadAudio(
   tracksDir: string,
   onProgress: (percent: number) => void,
   signal?: AbortSignal,
+  onRetry?: (attempt: number, maxAttempts: number) => void,
 ): Promise<string> {
   assertAllowedSourceUrl(sourceUrl);
-  const tmpId = randomUUID();
-  const outTemplate = path.join(tracksDir, `.tmp-${tmpId}.%(ext)s`);
+  const prefixes: string[] = [];
 
   const onLine = (line: string) => {
     const m = line.match(/\[download\]\s+([\d.]+)%/);
     if (m) onProgress(Math.min(100, parseFloat(m[1])));
   };
 
-  const { code, stderr } = await run(
-    YT_DLP,
-    [
-      "-f",
-      "bestaudio",
-      "-o",
-      outTemplate,
-      "--no-playlist",
-      "--newline",
-      "--progress",
-      "--no-warnings",
-      sourceUrl,
-    ],
-    { signal, onStdout: onLine, onStderr: onLine },
-  );
-  if (code !== 0) throw new Error(`다운로드 실패: ${tail(stderr) || `종료코드 ${code}`}`);
+  let completedPath: string | undefined;
+  try {
+    for (let attempt = 1; attempt <= DOWNLOAD_MAX_ATTEMPTS; attempt += 1) {
+      if (signal?.aborted) throw new AbortError();
+      // 이전 시도의 "완료 파일처럼 보이는" 찌꺼기도 고르지 않도록 경로를 분리한다.
+      const prefix = `.tmp-${randomUUID()}.`;
+      prefixes.push(prefix);
+      const outTemplate = path.join(tracksDir, `${prefix}%(ext)s`);
+      const { code, stderr } = await runYtDlp(
+        [
+          "-f",
+          "bestaudio",
+          "-o",
+          outTemplate,
+          "--no-playlist",
+          "--newline",
+          "--progress",
+          "--no-warnings",
+          sourceUrl,
+        ],
+        { signal, onStdout: onLine, onStderr: onLine },
+      );
+      if (signal?.aborted) throw new AbortError();
+      if (code === 0) {
+        completedPath = await completedDownload(tracksDir, prefix);
+        if (!completedPath) throw new Error("다운로드된 파일을 찾을 수 없습니다");
+        onProgress(100);
+        return completedPath;
+      }
 
-  const files = await fs.readdir(tracksDir);
-  const match = files.find((f) => f.startsWith(`.tmp-${tmpId}.`));
-  if (!match) throw new Error("다운로드된 파일을 찾을 수 없습니다");
-  onProgress(100);
-  return path.join(tracksDir, match);
+      const forbidden = isForbiddenDownload(stderr);
+      await cleanupDownloadFiles(tracksDir, prefix);
+      if (!forbidden || attempt === DOWNLOAD_MAX_ATTEMPTS) {
+        const reason = safeDownloadTail(stderr) || `종료코드 ${code}`;
+        const repeated = forbidden && attempt === DOWNLOAD_MAX_ATTEMPTS
+          ? " (403 오류가 3회 반복됐습니다. 원본 링크의 접근 상태를 확인해 주세요.)"
+          : "";
+        throw new Error(`다운로드 실패: ${reason}${repeated}`);
+      }
+
+      const nextAttempt = attempt + 1;
+      onRetry?.(nextAttempt, DOWNLOAD_MAX_ATTEMPTS);
+      await waitForRetry(DOWNLOAD_RETRY_DELAYS_MS[attempt - 1], signal);
+    }
+    throw new Error("다운로드 시도 횟수를 초과했습니다");
+  } finally {
+    await Promise.all(prefixes.map((prefix) => cleanupDownloadFiles(tracksDir, prefix, completedPath)));
+  }
 }
 
 /**

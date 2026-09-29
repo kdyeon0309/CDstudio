@@ -3,7 +3,15 @@ import { once } from "events";
 import { createWriteStream, promises as fs } from "fs";
 import path from "path";
 import type { AlbumProject, BurnEvent, BurnSettings, DriveStatus, Track } from "./types";
-import { MAX_AUDIO_MINUTES, formatDuration } from "./types";
+import {
+  DEFAULT_BURN_PREGAP_SEC,
+  MAX_AUDIO_MINUTES,
+  MAX_BURN_TRACKS,
+  discOccupancySec,
+  discOccupancySecFromTracks,
+  formatDuration,
+  isAudioCdMediaType,
+} from "./types";
 import { safeFilename } from "./storage";
 
 const DRUTIL = "/usr/bin/drutil";
@@ -17,10 +25,8 @@ export const BURN_LOCK_KEY = "burn:drive";
 export const CD_FRAME_BYTES = 2352;
 /** 1초 = 75프레임 (Red Book) */
 export const CD_FRAMES_PER_SEC = 75;
-/** Red Book 최대 트랙 수 */
-const CD_MAX_TRACKS = 99;
 /** 기본 트랙 간 프리갭 (초) — BurnSettings.pregapSec 미지정 시 */
-export const DEFAULT_PREGAP_SEC = 2;
+export const DEFAULT_PREGAP_SEC = DEFAULT_BURN_PREGAP_SEC;
 
 const BIN_NAME = "audio.bin";
 const CUE_NAME = "audio.cue";
@@ -49,22 +55,44 @@ export function effectivePregapSec(settings?: BurnSettings): number {
   return value;
 }
 
-function run(command: string, args: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
+function run(command: string, args: string[], timeoutMs = 15_000): Promise<{ stdout: string; stderr: string; code: number }> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
+    let timedOut = false;
+    let tooLarge = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, timeoutMs);
 
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
       stdout += chunk;
+      if (stdout.length > 64 * 1024) {
+        tooLarge = true;
+        child.kill("SIGKILL");
+      }
     });
     child.stderr.on("data", (chunk: string) => {
       stderr += chunk;
+      if (stderr.length > 64 * 1024) {
+        tooLarge = true;
+        child.kill("SIGKILL");
+      }
     });
-    child.on("error", reject);
-    child.on("close", (code) => resolve({ stdout, stderr, code: code ?? -1 }));
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once("close", (code) => {
+      clearTimeout(timer);
+      if (timedOut) reject(new Error("도구 실행 시간이 초과되었습니다."));
+      else if (tooLarge) reject(new Error("도구 출력이 허용 크기를 초과했습니다."));
+      else resolve({ stdout, stderr, code: code ?? -1 });
+    });
   });
 }
 
@@ -79,7 +107,7 @@ function positiveValue(value: string | undefined): boolean {
 
 export async function getDriveStatus(): Promise<DriveStatus> {
   try {
-    const result = await run(DRUTIL, ["status"]);
+    const result = await run(DRUTIL, ["status"], 10_000);
     const raw = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
     const type = field(raw, "Type");
     // 드라이브가 있어도 drutil이 0이 아닌 코드로 끝나는 경우가 있어,
@@ -125,6 +153,7 @@ export async function getDriveStatus(): Promise<DriveStatus> {
       connected: true,
       vendor,
       product,
+      mediaType: mediaPresent ? type?.trim() : undefined,
       mediaPresent,
       blank:
         mediaPresent &&
@@ -351,10 +380,10 @@ export async function prepareBurnStaging(
   if (staged.length === 0) {
     return { ...base, failures: ["굽기할 트랙이 없습니다."] };
   }
-  if (staged.length > CD_MAX_TRACKS) {
+  if (staged.length > MAX_BURN_TRACKS) {
     return {
       ...base,
-      failures: [`오디오 CD는 최대 ${CD_MAX_TRACKS}트랙까지만 구울 수 있습니다. (현재 ${staged.length}개)`],
+      failures: [`오디오 CD는 최대 ${MAX_BURN_TRACKS}트랙까지만 구울 수 있습니다. (현재 ${staged.length}개)`],
     };
   }
   const unresolved = staged.filter((entry) => entry.error);
@@ -493,10 +522,14 @@ export async function validateForBurn(
   project: AlbumProject,
   staged: StagedTrack[],
   settings?: BurnSettings,
+  writableMinutes?: number,
 ): Promise<string[]> {
   const failures: string[] = [];
 
   if (project.tracks.length === 0) failures.push("굽기할 트랙이 없습니다.");
+  if (project.tracks.length > MAX_BURN_TRACKS) {
+    failures.push(`오디오 CD는 최대 ${MAX_BURN_TRACKS}트랙까지만 구울 수 있습니다. (현재 ${project.tracks.length}개)`);
+  }
 
   const incomplete = project.tracks.filter((track) => track.status !== "done");
   if (incomplete.length > 0) {
@@ -508,6 +541,7 @@ export async function validateForBurn(
   }
 
   let totalSec = 0;
+  const trackDurationsSec: number[] = [];
   let durationKnown = true;
 
   for (const [index, entry] of staged.entries()) {
@@ -548,6 +582,7 @@ export async function validateForBurn(
       const duration = Number(parsed.format?.duration);
       if (Number.isFinite(duration) && duration > 0) {
         totalSec += duration;
+        trackDurationsSec.push(duration);
       } else {
         failures.push(`${label}: 재생 시간을 확인할 수 없습니다.`);
         durationKnown = false;
@@ -561,14 +596,20 @@ export async function validateForBurn(
   // 트랙 간격은 실제로 디스크를 점유한다. 1번 트랙 앞 2초 리드인은 규격상 고정이고,
   // 설정한 간격은 2번 트랙부터 (트랙수−1)회 삽입된다.
   const pregapSec = effectivePregapSec(settings);
-  const gapSec =
-    staged.length > 0 ? DEFAULT_PREGAP_SEC + Math.max(0, staged.length - 1) * pregapSec : 0;
-  const discSec = totalSec + gapSec;
+  const discSec = discOccupancySecFromTracks(trackDurationsSec, pregapSec);
+  const gapSec = discOccupancySec(0, staged.length, pregapSec);
 
   if (durationKnown && discSec > MAX_AUDIO_MINUTES * 60) {
     failures.push(
-      `총 재생 시간이 ${MAX_AUDIO_MINUTES}분을 초과합니다. ` +
-        `(트랙 간격 포함 ${formatDuration(discSec)} — 오디오 ${formatDuration(totalSec)} + 간격 ${formatDuration(gapSec)})`,
+      `디스크 점유 시간이 ${MAX_AUDIO_MINUTES}분을 초과합니다. ` +
+        `(CD 프레임 올림·트랙 간격 포함 ${formatDuration(Math.ceil(discSec))} — 오디오 ${formatDuration(totalSec)} + 간격 ${formatDuration(gapSec)})`,
+    );
+  }
+  if (durationKnown && typeof writableMinutes === "number" && Number.isFinite(writableMinutes)
+    && writableMinutes >= 0 && discSec > writableMinutes * 60) {
+    failures.push(
+      `삽입된 디스크의 남은 용량을 초과합니다. ` +
+        `(필요 ${formatDuration(Math.ceil(discSec))} / 남은 약 ${formatDuration(Math.floor(writableMinutes * 60))})`,
     );
   }
 
@@ -599,8 +640,11 @@ function emitLines(
 export function checkDriveReady(status: DriveStatus): string | null {
   if (!status.connected) return "광학 드라이브가 연결되어 있지 않습니다.";
   if (!status.mediaPresent) return "드라이브에 디스크가 없습니다.";
-  if (!status.blank && !status.erasable) {
-    return "기록 가능한 공 CD가 아닙니다. 새 CD-R 또는 지울 수 있는 CD-RW를 넣어 주세요.";
+  if (!isAudioCdMediaType(status.mediaType)) {
+    return "오디오 CD는 공 CD-R 또는 지울 수 있는 CD-RW에만 구울 수 있습니다. DVD/BD 미디어를 교체해 주세요.";
+  }
+  if (!status.blank) {
+    return "비어 있는 CD가 아닙니다. 새 CD-R 또는 미리 지워 둔 공 CD-RW를 넣어 주세요. 기존 CD-RW 내용은 자동 삭제하지 않습니다.";
   }
   return null;
 }

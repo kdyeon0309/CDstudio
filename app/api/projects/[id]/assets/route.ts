@@ -2,7 +2,8 @@ import { promises as fs } from "fs";
 import path from "path";
 import { randomUUID } from "crypto";
 import { assetsDir, getProject, safeFilename, updateProjectWith } from "@/lib/storage";
-import { rejectCrossOrigin } from "@/lib/server-guards";
+import { acquireJobLock, rejectCrossOrigin, releaseJobLock } from "@/lib/server-guards";
+import { studioAssetReferences } from "@/lib/studio";
 import { ARTWORK_PARTS, type ArtworkPart } from "@/lib/types";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -54,10 +55,6 @@ export async function DELETE(request: Request, { params }: Ctx) {
   if (crossOrigin) return crossOrigin;
 
   const { id } = await params;
-  const project = await getProject(id).catch(() => null);
-  if (!project) {
-    return Response.json({ error: "앨범을 찾을 수 없습니다." }, { status: 404 });
-  }
 
   let body: unknown;
   try {
@@ -82,34 +79,43 @@ export async function DELETE(request: Request, { params }: Ctx) {
     return Response.json({ error: "올바른 이미지 파일명이 아닙니다." }, { status: 400 });
   }
 
+  const lockKey = `design:${id}`;
+  const lockToken = acquireJobLock(lockKey);
+  if (!lockToken) return Response.json({ error: "디자인 작업 중에는 사진을 삭제할 수 없습니다." }, { status: 409 });
   try {
-    await fs.unlink(path.join(assetsDir(id), filename));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return Response.json({ error: "사진을 찾을 수 없습니다." }, { status: 404 });
+    const project = await getProject(id).catch(() => null);
+    if (!project) return Response.json({ error: "앨범을 찾을 수 없습니다." }, { status: 404 });
+    if (studioAssetReferences(project, filename)) {
+      return Response.json({ error: "스튜디오 후보 또는 참고 이미지가 사용 중인 파일입니다." }, { status: 409 });
     }
-    return Response.json({ error: "사진을 삭제하지 못했습니다." }, { status: 500 });
-  }
+    try {
+      await fs.unlink(path.join(assetsDir(id), filename));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return Response.json({ error: "사진을 찾을 수 없습니다." }, { status: 404 });
+      }
+      return Response.json({ error: "사진을 삭제하지 못했습니다." }, { status: 500 });
+    }
 
-  let removedParts: ArtworkPart[] = [];
-  const updated = await updateProjectWith(id, (latest) => {
-    const partPhotos = { ...(latest.artwork.partPhotos ?? {}) };
-    removedParts = ARTWORK_PARTS.filter((part) => partPhotos[part] === filename);
-    for (const part of removedParts) delete partPhotos[part];
-    return {
-      ...latest,
-      artwork: { ...latest.artwork, partPhotos },
-    };
-  });
-
-  if (!updated) {
-    return Response.json({ error: "앨범을 찾을 수 없습니다." }, { status: 404 });
+    let removedParts: ArtworkPart[] = [];
+    const updated = await updateProjectWith(id, (latest) => {
+      const partPhotos = { ...(latest.artwork.partPhotos ?? {}) };
+      removedParts = ARTWORK_PARTS.filter((part) => partPhotos[part] === filename);
+      for (const part of removedParts) delete partPhotos[part];
+      return {
+        ...latest,
+        artwork: { ...latest.artwork, partPhotos },
+      };
+    });
+    if (!updated) return Response.json({ error: "앨범을 찾을 수 없습니다." }, { status: 404 });
+    return Response.json({ ok: true, removedParts });
+  } finally {
+    releaseJobLock(lockKey, lockToken);
   }
-  return Response.json({ ok: true, removedParts });
 }
 
 /** 업로드 상한 (H8) */
-const MAX_FILE_BYTES = 5 * 1024 * 1024; // 파일당 5MB
+const MAX_FILE_BYTES = 20 * 1024 * 1024; // 파일당 20MB (요청 총량도 20MB)
 const MAX_REQUEST_BYTES = 20 * 1024 * 1024; // 요청당 20MB
 const MAX_FILES = 5; // 요청당 파일 개수
 /** multipart 경계·헤더 오버헤드 여유 */
