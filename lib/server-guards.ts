@@ -37,11 +37,29 @@ export function rejectCrossOrigin(request: Request): Response | null {
 // ── 소유 토큰 기반 인메모리 작업 락 ──────────────────────────
 // 예: "burn:drive"(전역 굽기), `extract:${projectId}`, `design:${projectId}`
 // 획득한 쪽만(토큰 일치 시) 해제할 수 있어, 취소 경합 시 남의 락을 지우지 못한다.
-const jobLocks = new Map<string, string>();
+// 개발 서버의 모듈 재평가로 실행 중 작업의 락이 사라지지 않게 한다.
+// 서버 프로세스를 종료하면 작업과 락도 함께 종료된다.
+const lockHost = globalThis as typeof globalThis & {
+  __cdstudioJobLocks?: Map<string, string>;
+};
+const jobLocks = lockHost.__cdstudioJobLocks ??= new Map<string, string>();
+
+/** 앨범 전체 디자인 작업과 영역 작업은 상호 배타적이고, 서로 다른 영역은 병렬이다. */
+function conflictsWithJobLock(key: string): boolean {
+  if (jobLocks.has(key)) return true;
+  if (!key.startsWith("design:")) return false;
+  const segments = key.split(":");
+  const albumKey = `design:${segments[1]}`;
+  if (segments.length > 2) return jobLocks.has(albumKey);
+  for (const heldKey of jobLocks.keys()) {
+    if (heldKey.startsWith(`${albumKey}:`)) return true;
+  }
+  return false;
+}
 
 /** 락 획득 시 해제용 토큰 반환, 이미 잠겨 있으면 null */
 export function acquireJobLock(key: string): string | null {
-  if (jobLocks.has(key)) return null;
+  if (conflictsWithJobLock(key)) return null;
   const token = randomUUID();
   jobLocks.set(key, token);
   return token;
@@ -53,5 +71,5 @@ export function releaseJobLock(key: string, token: string): void {
 }
 
 export function isJobLocked(key: string): boolean {
-  return jobLocks.has(key);
+  return conflictsWithJobLock(key);
 }
