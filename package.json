@@ -7,20 +7,22 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test:unit": "node --test tests/burn-capacity.mjs tests/burn-confirmation.mjs tests/download-retry.mjs tests/extract-contract.mjs tests/extract-duration.mjs tests/image-generation.mjs tests/studio-reference-labels.mjs tests/studio-view.mjs tests/track-patch-concurrency.mjs",
+    "test:unit": "node --test tests/burn-capacity.mjs tests/burn-confirmation.mjs tests/download-retry.mjs tests/extract-contract.mjs tests/extract-duration.mjs tests/image-generation.mjs tests/image-artifacts.mjs tests/image-recovery-route.mjs tests/design-presets.mjs tests/design-preset-ui.mjs tests/jewel-preview.mjs tests/jewel-webgl.mjs tests/studio-generation-concurrency.mjs tests/studio-generation-ui.mjs tests/studio-reference-labels.mjs tests/studio-view.mjs tests/track-patch-concurrency.mjs tests/background-jobs.mjs tests/background-job-ui.mjs",
     "setup:yt-dlp": "node scripts/install-yt-dlp.mjs",
     "check:yt-dlp": "node scripts/install-yt-dlp.mjs --check"
   },
   "dependencies": {
     "next": "16.2.12",
     "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "react-dom": "19.2.4",
+    "three": "^0.186.1"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@types/three": "^0.186.0",
     "eslint": "^9",
     "eslint-config-next": "16.2.12",
     "tailwindcss": "^4",
