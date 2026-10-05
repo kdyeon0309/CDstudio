@@ -11,7 +11,10 @@ import type {
 } from "@/lib/types";
 import { ARTWORK_PARTS, PART_LABELS, PRINT_SPECS } from "@/lib/types";
 import ArtworkSheetPreview from "@/components/ArtworkSheetPreview";
-import { selectedStudioCandidate, selectedStudioParts, studioPart, studioPrintEnabled, studioPrintResolution, studioSpineNeedsBack } from "@/lib/studio-view";
+import FoldedFrontSheet from "@/components/FoldedFrontSheet";
+import FoldedBackSheet from "@/components/FoldedBackSheet";
+import { canBackFold, canFrontFold, printPartsForTarget, type PrintTarget } from "@/lib/print-plan";
+import { selectedStudioCandidate, selectedStudioParts, studioBackMayCropLegacyCandidate, studioPart, studioPrintEnabled, studioPrintResolution, studioSpineNeedsBack } from "@/lib/studio-view";
 import styles from "./print.module.css";
 
 /** 미세조정 범위 — lib/types.ts 의 PartTransform 주석 및 서버 PATCH 검증과 동일 */
@@ -89,6 +92,9 @@ function partNote(part: ArtworkPart) {
     const spec = PRINT_SPECS.label;
     return `Ø${spec.outerDiameterMm}mm · 내경 Ø${spec.innerDiameterMm}mm`;
   }
+  if (part === "back") {
+    return "150×118mm 트레이카드 · 중앙 아트 137×118mm · 좌우 스파인 각 6.5mm";
+  }
   const spec = PRINT_SPECS[part];
   const spine = "spineMm" in spec ? ` · 스파인 ${spec.spineMm}mm · 점선은 미리보기용, 인쇄 시 위쪽 표식만 표시` : "";
   return `${spec.widthMm}×${spec.heightMm}mm${spine}`;
@@ -120,11 +126,13 @@ function ArtworkFrame({
   filename,
   title,
   transform,
+  eager,
 }: {
   projectId: string;
   filename: string;
   title: string;
   transform: PartTransform;
+  eager: boolean;
 }) {
   const style: React.CSSProperties = {
     transform: `translate(${transform.offsetXMm}mm, ${transform.offsetYMm}mm) scale(${transform.scale})`,
@@ -136,7 +144,7 @@ function ArtworkFrame({
       style={style}
       src={artworkUrl(projectId, filename)}
       title={title}
-      loading="lazy"
+      loading={eager ? "eager" : "lazy"}
       sandbox=""
     />
   );
@@ -339,6 +347,7 @@ function ArtworkPage({
   onScale,
   onReset,
   status,
+  eager,
 }: {
   projectId: string;
   projectTitle: string;
@@ -355,6 +364,7 @@ function ArtworkPage({
   onScale: (delta: number) => void;
   onReset: () => void;
   status: React.ReactNode;
+  eager: boolean;
 }) {
   const filename = variant.files[part];
   const label = PART_LABELS[part];
@@ -431,6 +441,7 @@ function ArtworkPage({
                   filename={filename}
                   title={`${projectTitle} ${label}`}
                   transform={transform}
+                  eager={eager}
                 />
               </div>
               {hasFoldLines && (
@@ -456,26 +467,91 @@ function ArtworkPage({
   );
 }
 
+function PrintTargetSelector({
+  target,
+  onChange,
+  frontFoldAvailable,
+  backFoldAvailable,
+  remainingAvailable,
+}: {
+  target: PrintTarget;
+  onChange: (target: PrintTarget) => void;
+  frontFoldAvailable: boolean;
+  backFoldAvailable: boolean;
+  remainingAvailable: boolean;
+}) {
+  return (
+    <fieldset className="mt-4">
+      <legend className="text-xs font-semibold text-fg">인쇄 대상</legend>
+      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-2 text-xs text-fg-muted">
+        <label className="flex items-center gap-1.5">
+          <input type="radio" name="print-target" value="all" checked={target === "all"} onChange={() => onChange("all")} />
+          전체 영역
+        </label>
+        <label className={`flex items-center gap-1.5 ${frontFoldAvailable ? "" : "opacity-50"}`}>
+          <input type="radio" name="print-target" value="front-fold" checked={target === "front-fold"} disabled={!frontFoldAvailable} onChange={() => onChange("front-fold")} />
+          앞표지 접기 (1페이지)
+        </label>
+        <label className={`flex items-center gap-1.5 ${backFoldAvailable ? "" : "opacity-50"}`}>
+          <input type="radio" name="print-target" value="back-fold" checked={target === "back-fold"} disabled={!backFoldAvailable} onChange={() => onChange("back-fold")} />
+          뒷표지 접기 (1페이지)
+        </label>
+        <label className={`flex items-center gap-1.5 ${remainingAvailable ? "" : "opacity-50"}`}>
+          <input type="radio" name="print-target" value="remaining" checked={target === "remaining"} disabled={!remainingAvailable} onChange={() => onChange("remaining")} />
+          나머지 영역
+        </label>
+      </div>
+      {!frontFoldAvailable && (
+        <p className="mt-2 text-xs text-amber">앞표지와 앞표지 내부가 모두 준비되어야 접기용 한 페이지를 인쇄할 수 있습니다.</p>
+      )}
+      {!backFoldAvailable && <p className="mt-1 text-xs text-amber">뒷표지와 뒷표지 내부가 모두 준비되어야 접기용 한 페이지를 인쇄할 수 있습니다.</p>}
+      {!remainingAvailable && (
+        <p className="mt-1 text-xs text-amber">앞표지 외에 인쇄할 나머지 영역이 없습니다.</p>
+      )}
+      {target === "front-fold" && (
+        <p className="mt-2 max-w-3xl text-xs leading-5 text-fg-muted">
+          A4 가로·단면·배율 100%·여백 0으로 인쇄하고 머리글·바닥글은 끄고 배경 그래픽은 켜세요. 왼쪽은 앞표지 내부, 오른쪽은 앞표지입니다. 바깥 네 모서리 표식에 맞춰 외곽 사각형만 자르고, 중앙 위·아래 짧은 표식은 자르지 말고 접는 위치로 사용하세요. 인쇄되지 않은 뒷면끼리 맞닿도록 접으면 인쇄면이 바깥으로 나오며 완성 크기는 120×120mm입니다. 이미지 배치는 디자인 스튜디오에서, 기존 디자인의 조정값은 ‘전체 영역’의 ‘조정’에서 변경하세요.
+        </p>
+      )}
+      {target === "back-fold" && <p className="mt-2 max-w-3xl text-xs leading-5 text-fg-muted">A4 세로·단면·배율 100%·여백 0으로 인쇄하고 머리글·바닥글은 끄고 배경 그래픽은 켜세요. 위는 바깥 뒷표지, 아래는 180도 회전한 안쪽 뒷표지입니다. 바깥 네 모서리만 자르고 가운데 좌우 짧은 표식은 접는 위치로 사용하세요. 위·아래 스파인 표식은 6.5mm 접힘 위치입니다. 인쇄되지 않은 뒷면끼리 맞닿도록 접으면 완성 크기는 150×118mm입니다.</p>}
+      {target === "remaining" && (
+        <p className="mt-2 max-w-3xl text-xs leading-5 text-fg-muted">앞표지 접기와 분리된 A4 세로 단면 작업입니다. 나머지 영역을 기존 크기와 순서로 인쇄하세요.</p>
+      )}
+      {target === "all" && (
+        <p className="mt-2 max-w-3xl text-xs leading-5 text-fg-muted">전체 영역은 기존처럼 각 영역을 A4 세로 한 장씩 단면으로 인쇄합니다. 접는 앞표지가 필요하면 ‘앞표지 접기’를 별도로 인쇄한 뒤 ‘나머지 영역’을 인쇄하세요.</p>
+      )}
+    </fieldset>
+  );
+}
+
 function StudioPrint({ project }: { project: AlbumProject }) {
   const printableParts = selectedStudioParts(project);
   const spineCandidate = selectedStudioCandidate(project, "back-spine");
+  const [printTarget, setPrintTarget] = useState<PrintTarget>("all");
   const [overflowByPart, setOverflowByPart] = useState<Partial<Record<ArtworkPart, boolean>>>({});
-  const unverifiedOverlay = printableParts.some((part) =>
+  const plannedParts = printPartsForTarget(printableParts, printTarget);
+  const frontFoldAvailable = canFrontFold(printableParts);
+  const backFoldAvailable = canBackFold(printableParts);
+  const remainingAvailable = printPartsForTarget(printableParts, "remaining").length > 0;
+  const blockedByOrphanSpine = printTarget !== "front-fold" && studioSpineNeedsBack(project);
+  // 직접 Ctrl+P를 눌러도 단독 스파인이 있는 전체/나머지 계획은 부분 인쇄하지 않는다.
+  const renderedParts = blockedByOrphanSpine ? [] : plannedParts;
+  const unverifiedOverlay = renderedParts.some((part) =>
     (studioPart(project, part).presentation.overlay.enabled ||
       (part === "back" && spineCandidate && studioPart(project, "back-spine").presentation.overlay.enabled)) &&
     overflowByPart[part] === undefined,
   );
-  const overflowingParts = printableParts.filter((part) => overflowByPart[part]);
-  if (studioSpineNeedsBack(project)) {
-    return (
-      <section className="mx-auto max-w-xl rounded-2xl border border-line bg-panel p-8 text-center">
-        <h2 className="text-xl font-semibold text-fg">뒷표지 중앙 이미지가 필요합니다</h2>
-        <p className="mt-2 text-sm text-fg-muted">선택한 스파인은 뒷표지 중앙과 함께 한 장의 트레이카드로 인쇄됩니다. 디자인 스튜디오에서 뒷표지 후보를 확정해 주세요.</p>
-        <Link href={`/album/${encodeURIComponent(project.id)}/design`} className="mt-5 inline-flex rounded-lg bg-amber px-4 py-2 text-sm font-semibold text-ink">디자인 스튜디오로 이동</Link>
-      </section>
-    );
-  }
+  const overflowingParts = renderedParts.filter((part) => overflowByPart[part]);
   if (printableParts.length === 0) {
+    if (studioSpineNeedsBack(project)) {
+      return (
+        <section className="mx-auto max-w-xl rounded-2xl border border-line bg-panel p-8 text-center">
+          <h2 className="text-xl font-semibold text-fg">뒷표지 중앙 이미지가 필요합니다</h2>
+          <p className="mt-2 text-sm text-fg-muted">선택한 스파인은 뒷표지 중앙과 함께 한 장의 트레이카드로 인쇄됩니다. 디자인 스튜디오에서 뒷표지 후보를 확정해 주세요.</p>
+          <Link href={`/album/${encodeURIComponent(project.id)}/design`} className="mt-5 inline-flex rounded-lg bg-amber px-4 py-2 text-sm font-semibold text-ink">디자인 스튜디오로 이동</Link>
+        </section>
+      );
+    }
     return (
       <section className="mx-auto max-w-xl rounded-2xl border border-line bg-panel p-8 text-center">
         <h2 className="text-xl font-semibold text-fg">인쇄할 영역을 먼저 확정하세요</h2>
@@ -491,18 +567,34 @@ function StudioPrint({ project }: { project: AlbumProject }) {
         <div>
           <p className="font-mono text-xs uppercase tracking-[0.18em] text-amber">③ 실치수 인쇄</p>
           <h2 className="mt-2 text-2xl font-semibold text-fg">영역별 디자인 인쇄</h2>
-          <p className="mt-1 text-sm text-fg-muted">A4, 배율 100%로 인쇄하세요. 선택한 {printableParts.length}개 영역이 각각 한 장에 배치됩니다.</p>
+          <p className="mt-1 text-sm text-fg-muted">{printTarget === "front-fold" ? "앞표지 두 면이 A4 가로 한 장에 배치됩니다." : printTarget === "back-fold" ? "뒷표지 바깥면과 안쪽면이 A4 세로 한 장에 배치됩니다." : `A4, 배율 100%로 인쇄하세요. 현재 대상 ${renderedParts.length}개 영역이 각각 한 장에 배치됩니다.`}</p>
+          <PrintTargetSelector target={printTarget} onChange={setPrintTarget} frontFoldAvailable={frontFoldAvailable} backFoldAvailable={backFoldAvailable} remainingAvailable={remainingAvailable} />
           <Link href={`/album/${encodeURIComponent(project.id)}/design`} className="mt-2 inline-flex text-xs text-amber hover:underline">디자인 스튜디오에서 배치 조정 →</Link>
+          <span className="mx-2 text-line-strong" aria-hidden="true">·</span>
+          <Link href={`/album/${encodeURIComponent(project.id)}/preview`} className="inline-flex text-xs text-amber hover:underline">완성 모습 3D →</Link>
         </div>
-        <button type="button" disabled={unverifiedOverlay || overflowingParts.length > 0} onClick={() => window.print()} className="rounded-xl bg-amber px-5 py-3 text-sm font-bold text-ink disabled:cursor-not-allowed disabled:opacity-40">인쇄 (PDF 저장)</button>
+        <button type="button" disabled={renderedParts.length === 0 || blockedByOrphanSpine || unverifiedOverlay || overflowingParts.length > 0} onClick={() => window.print()} className="rounded-xl bg-amber px-5 py-3 text-sm font-bold text-ink disabled:cursor-not-allowed disabled:opacity-40">인쇄 (PDF 저장)</button>
       </header>
+      {blockedByOrphanSpine && <p role="alert" className={`${styles.screenOnly} mb-4 rounded-lg border border-amber/40 bg-amber/10 p-3 text-xs text-amber`}>선택한 스파인은 뒷표지 중앙과 함께 인쇄됩니다. 전체 또는 나머지 영역을 인쇄하려면 디자인 스튜디오에서 뒷표지 후보를 확정하세요. 앞표지 접기는 별도로 사용할 수 있습니다.</p>}
       {overflowingParts.length > 0 && <p role="alert" className={`${styles.screenOnly} mb-4 rounded-lg border border-rose/40 bg-rose/10 p-3 text-xs text-rose`}>{overflowingParts.map((part) => PART_LABELS[part]).join(", ")} 글자가 인쇄 영역을 벗어납니다. 디자인 스튜디오에서 글자 크기를 줄이거나 글자를 끄세요.</p>}
       <p className={`${styles.screenOnly} mb-3 text-xs text-fg-dim`}>PPI는 원본 픽셀과 인쇄 크기로 추정한 값입니다. 이미지 전체 보기는 흐린 배경도 고려합니다. 300PPI 미달 경고가 있어도 인쇄할 수 있습니다.</p>
       <div className={styles.preview}>
-        {printableParts.map((part, index) => {
+        {printTarget === "front-fold" && renderedParts.length === 2 ? (
+          <FoldedFrontSheet
+            left={<ArtworkSheetPreview project={project} part="front-inner" candidate={selectedStudioCandidate(project, "front-inner")!} presentation={studioPart(project, "front-inner").presentation} embedded onOverflow={(overflow) => setOverflowByPart((current) => current["front-inner"] === overflow ? current : { ...current, "front-inner": overflow })} />}
+            right={<ArtworkSheetPreview project={project} part="front" candidate={selectedStudioCandidate(project, "front")!} presentation={studioPart(project, "front").presentation} embedded onOverflow={(overflow) => setOverflowByPart((current) => current.front === overflow ? current : { ...current, front: overflow })} />}
+          />
+        ) : printTarget === "back-fold" && renderedParts.length === 2 ? (
+          <FoldedBackSheet
+            outside={<ArtworkSheetPreview project={project} part="back" candidate={selectedStudioCandidate(project, "back")!} presentation={studioPart(project, "back").presentation} spineCandidate={spineCandidate} spinePresentation={spineCandidate ? studioPart(project, "back-spine").presentation : undefined} embedded onOverflow={(overflow) => setOverflowByPart((current) => current.back === overflow ? current : { ...current, back: overflow })} />}
+            inside={<ArtworkSheetPreview project={project} part="back-inner" candidate={selectedStudioCandidate(project, "back-inner")!} presentation={studioPart(project, "back-inner").presentation} embedded onOverflow={(overflow) => setOverflowByPart((current) => current["back-inner"] === overflow ? current : { ...current, "back-inner": overflow })} />}
+          />
+        ) : renderedParts.map((part, index) => {
           const candidate = selectedStudioCandidate(project, part);
           if (!candidate) return null;
-          const resolution = studioPrintResolution(candidate, part, studioPart(project, part).presentation, part === "back" && Boolean(spineCandidate));
+          const presentation = studioPart(project, part).presentation;
+          const resolution = studioPrintResolution(candidate, part, presentation);
+          const backMayCropLegacyCandidate = part === "back" && studioBackMayCropLegacyCandidate(candidate, presentation);
           const spineResolution = part === "back" && spineCandidate
             ? studioPrintResolution(spineCandidate, "back-spine", studioPart(project, "back-spine").presentation) : null;
           return (
@@ -512,11 +604,12 @@ function StudioPrint({ project }: { project: AlbumProject }) {
                 <span className="ml-3 font-mono text-xs text-fg-dim">{partNote(part)}</span>
                 <span className={`ml-3 text-xs ${resolution.grade === "target" ? "text-fg-dim" : "text-amber"}`}>인쇄 이미지 {resolution.widthPx}×{resolution.heightPx}px · 약 {resolution.ppi}PPI{resolution.grade !== "target" ? ` · 300PPI 목표 미달${resolution.grade === "low" ? " (저해상도)" : ""}` : " · 목표 충족"}</span>
               </div>
+              {backMayCropLegacyCandidate && <p role="alert" className={`${styles.screenOnly} mb-2 text-xs text-amber`}>기존 풀폭 뒷표지 이미지는 중앙 137mm에 맞출 때 양옆이 잘릴 수 있습니다. 디자인 스튜디오에서 ‘이미지 전체 보기’로 바꾸거나 새 규격으로 다시 생성하세요.</p>}
               {!resolution.fullBleed && <p role="alert" className={`${styles.screenOnly} mb-2 text-xs text-amber`}>여백 가능: 현재 축소·이동 설정으로 이미지가 인쇄 영역을 끝까지 채우지 못할 수 있습니다.</p>}
               {spineResolution && <p className={`${styles.screenOnly} mb-2 text-xs ${spineResolution.grade === "target" ? "text-fg-dim" : "text-amber"}`}>선택한 스파인 인쇄 이미지 {spineResolution.widthPx}×{spineResolution.heightPx}px · 6.5×118mm · 약 {spineResolution.ppi}PPI{spineResolution.grade !== "target" ? ` · 300PPI 목표 미달${spineResolution.grade === "low" ? " (저해상도)" : ""}` : " · 목표 충족"}</p>}
               {spineResolution && !spineResolution.fullBleed && <p role="alert" className={`${styles.screenOnly} mb-2 text-xs text-amber`}>선택한 스파인 여백 가능: 스파인 배치를 확인하세요.</p>}
               <div className={styles.scaledSheet}>
-                <ArtworkSheetPreview project={project} part={part} candidate={candidate} presentation={studioPart(project, part).presentation} spineCandidate={part === "back" ? spineCandidate : undefined} spinePresentation={part === "back" && spineCandidate ? studioPart(project, "back-spine").presentation : undefined} last={index === printableParts.length - 1} onOverflow={(overflow) => setOverflowByPart((current) => current[part] === overflow ? current : { ...current, [part]: overflow })} />
+                <ArtworkSheetPreview project={project} part={part} candidate={candidate} presentation={studioPart(project, part).presentation} spineCandidate={part === "back" ? spineCandidate : undefined} spinePresentation={part === "back" && spineCandidate ? studioPart(project, "back-spine").presentation : undefined} last={index === renderedParts.length - 1} onOverflow={(overflow) => setOverflowByPart((current) => current[part] === overflow ? current : { ...current, [part]: overflow })} />
               </div>
             </div>
           );
@@ -537,6 +630,7 @@ export default function PrintClient({ projectId }: { projectId: string }) {
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [saveError, setSaveError] = useState("");
   const [editedPart, setEditedPart] = useState<ArtworkPart | null>(null);
+  const [printTarget, setPrintTarget] = useState<PrintTarget>("all");
 
   /** 저장 payload 의 단일 진실 — 디바운스 타이머가 실행 시점에 읽는다 */
   const transformsRef = useRef<PartTransforms>({});
@@ -704,7 +798,6 @@ export default function PrintClient({ projectId }: { projectId: string }) {
 
   const printableParts = ARTWORK_PARTS.filter((part) => selectedVariant?.files[part]);
   const hasPrintablePart = printableParts.length > 0;
-  const lastPrintablePart = printableParts[printableParts.length - 1];
 
   if (!selectedVariant || !hasPrintablePart) {
     return (
@@ -727,6 +820,13 @@ export default function PrintClient({ projectId }: { projectId: string }) {
       </section>
     );
   }
+
+  const plannedParts = printPartsForTarget(printableParts, printTarget);
+  const displayedParts = printTarget === "all" ? ARTWORK_PARTS : plannedParts;
+  const lastPrintablePart = plannedParts[plannedParts.length - 1];
+  const frontFoldAvailable = canFrontFold(printableParts);
+  const backFoldAvailable = canBackFold(printableParts);
+  const remainingAvailable = printPartsForTarget(printableParts, "remaining").length > 0;
 
   const statusNode = (part: ArtworkPart): React.ReactNode => {
     if (editedPart !== part) return null;
@@ -760,22 +860,35 @@ export default function PrintClient({ projectId }: { projectId: string }) {
           <p className="mt-1 text-sm text-fg-muted">
             {selectedVariant.index}안 · {selectedVariant.name} — A4, 배율 100%로 인쇄하세요.
           </p>
+          <PrintTargetSelector target={printTarget} onChange={setPrintTarget} frontFoldAvailable={frontFoldAvailable} backFoldAvailable={backFoldAvailable} remainingAvailable={remainingAvailable} />
           <p className="mt-1 text-xs text-fg-dim">
             사진 크롭 위치나 프린터 오차는 각 영역의 &ldquo;조정&rdquo;에서 맞추세요. 조정값은
             미리보기와 실제 인쇄에 똑같이 적용되고 자동 저장됩니다.
           </p>
+          <Link href={`/album/${encodeURIComponent(projectId)}/preview`} className="mt-2 inline-flex text-xs text-amber hover:underline">완성 모습 3D →</Link>
         </div>
         <button
           type="button"
+          disabled={plannedParts.length === 0}
           onClick={() => window.print()}
-          className="rounded-xl bg-violet-700 px-5 py-3 text-sm font-bold text-white shadow-lg shadow-violet-950/30 transition hover:bg-violet-600"
+          className="rounded-xl bg-violet-700 px-5 py-3 text-sm font-bold text-white shadow-lg shadow-violet-950/30 transition hover:bg-violet-600 disabled:cursor-not-allowed disabled:opacity-40"
         >
           인쇄 (PDF 저장)
         </button>
       </header>
 
       <div className={styles.preview}>
-        {ARTWORK_PARTS.map((part) => (
+        {printTarget === "front-fold" && plannedParts.length === 2 ? (
+          <FoldedFrontSheet
+            left={<ArtworkFrame projectId={projectId} filename={selectedVariant.files["front-inner"]!} title={`${project.title} ${PART_LABELS["front-inner"]}`} transform={transforms["front-inner"] ?? IDENTITY} eager />}
+            right={<ArtworkFrame projectId={projectId} filename={selectedVariant.files.front!} title={`${project.title} ${PART_LABELS.front}`} transform={transforms.front ?? IDENTITY} eager />}
+          />
+        ) : printTarget === "back-fold" && plannedParts.length === 2 ? (
+          <FoldedBackSheet
+            outside={<ArtworkFrame projectId={projectId} filename={selectedVariant.files.back!} title={`${project.title} ${PART_LABELS.back}`} transform={transforms.back ?? IDENTITY} eager />}
+            inside={<ArtworkFrame projectId={projectId} filename={selectedVariant.files["back-inner"]!} title={`${project.title} ${PART_LABELS["back-inner"]}`} transform={transforms["back-inner"] ?? IDENTITY} eager />}
+          />
+        ) : displayedParts.map((part) => (
           <ArtworkPage
             key={part}
             projectId={projectId}
@@ -802,6 +915,7 @@ export default function PrintClient({ projectId }: { projectId: string }) {
             }
             onReset={() => updateTransform(part, () => IDENTITY)}
             status={statusNode(part)}
+            eager={false}
           />
         ))}
       </div>
