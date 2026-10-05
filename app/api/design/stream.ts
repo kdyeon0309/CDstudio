@@ -22,6 +22,7 @@ export function designSseResponse(
   const abortController = new AbortController();
   const abort = () => abortController.abort();
   request.signal.addEventListener("abort", abort, { once: true });
+  if (request.signal.aborted) abort();
   const signal = abortController.signal;
 
   const stream = new ReadableStream<Uint8Array>({
@@ -59,7 +60,7 @@ export function designSseResponse(
       }, 10000);
 
       try {
-        await run({ send, signal });
+        if (!signal.aborted) await run({ send, signal });
       } catch (err) {
         if (!signal.aborted) {
           send({
