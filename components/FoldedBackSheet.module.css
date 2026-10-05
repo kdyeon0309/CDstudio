@@ -1,0 +1,40 @@
+.wrapper { flex: none; page: cd-back-fold; }
+.foldSheet { position: relative; width: 210mm; height: 297mm; overflow: hidden; background: white; box-shadow: 0 24px 70px rgb(0 0 0 / 45%); zoom: .98; }
+.sheetLabel { position: absolute; top: 8mm; left: 50%; translate: -50% 0; color: #52525b; font-size: .875rem; font-weight: 700; }
+.foldStrip { position: absolute; top: 30.5mm; left: 30mm; width: 150mm; height: 236mm; }
+.face { position: relative; width: 150mm; height: 118mm; overflow: hidden; color-scheme: light; }
+.inside { transform: rotate(180deg); }
+.outerCropMarks { position: absolute; z-index: 10; inset: 0; pointer-events: none; }
+.outerCropMarks i { position: absolute; width: 6mm; height: 6mm; }
+.outerCropMarks i:nth-child(1) { top: -6mm; left: -6mm; }
+.outerCropMarks i:nth-child(2) { top: -6mm; right: -6mm; }
+.outerCropMarks i:nth-child(3) { bottom: -6mm; left: -6mm; }
+.outerCropMarks i:nth-child(4) { right: -6mm; bottom: -6mm; }
+.outerCropMarks i::before, .outerCropMarks i::after { position: absolute; content: ""; background: #111; }
+.outerCropMarks i::before { width: 4mm; height: .2mm; }
+.outerCropMarks i::after { width: .2mm; height: 4mm; }
+.outerCropMarks i:nth-child(1)::before, .outerCropMarks i:nth-child(2)::before { bottom: 0; }
+.outerCropMarks i:nth-child(3)::before, .outerCropMarks i:nth-child(4)::before { top: 0; }
+.outerCropMarks i:nth-child(2)::before, .outerCropMarks i:nth-child(4)::before { right: 0; }
+.outerCropMarks i:nth-child(1)::after, .outerCropMarks i:nth-child(2)::after { top: 0; }
+.outerCropMarks i:nth-child(3)::after, .outerCropMarks i:nth-child(4)::after { bottom: 0; }
+.outerCropMarks i:nth-child(1)::after, .outerCropMarks i:nth-child(3)::after { right: 0; }
+.screenFoldLine { position: absolute; z-index: 9; top: 118mm; left: 0; right: 0; border-top: .25mm dotted rgb(24 24 27 / 65%); }
+.foldTick { position: absolute; z-index: 10; top: 118mm; width: 2mm; border-top: .25mm solid #111; }
+.foldTickLeft { left: -4mm; } .foldTickRight { right: -4mm; }
+.spineTick { position: absolute; z-index: 10; height: 2mm; border-left: .25mm solid #111; }
+.topLeft, .bottomLeft { left: 6.5mm; } .topRight, .bottomRight { left: 143.5mm; }
+.topLeft, .topRight { top: -4mm; } .bottomLeft, .bottomRight { bottom: -4mm; }
+.screenSpineLine { position: absolute; z-index: 9; top: 0; bottom: 0; border-left: .25mm dashed rgb(24 24 27 / 50%); }
+.spineLeft { left: 6.5mm; } .spineRight { left: 143.5mm; }
+@media screen and (max-width: 680px) { .foldSheet { zoom: .42; } }
+@media screen and (max-width: 900px) and (min-width: 681px) { .foldSheet { zoom: .72; } }
+@media screen and (max-width: 540px) { .foldSheet { zoom: .33; } }
+@media screen and (max-width: 420px) { .foldSheet { zoom: .29; } }
+@media screen and (max-width: 340px) { .foldSheet { zoom: .24; } }
+@page cd-back-fold { size: A4 portrait; margin: 0; }
+@media print {
+  .wrapper { display: block; width: 210mm !important; height: 297mm !important; }
+  .foldSheet { zoom: 1 !important; margin: 0; box-shadow: none; }
+  .sheetLabel, .screenFoldLine, .screenSpineLine { display: none; }
+}
