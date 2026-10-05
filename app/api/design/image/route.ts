@@ -20,7 +20,7 @@ import {
   ImageGenerationError,
 } from "@/lib/image-generation";
 import type { StudioArtworkPart, StudioCandidate, StudioImageEvent } from "@/lib/types";
-import { acquireDesignLock, designBusyResponse } from "../shared";
+import { acquireDesignPartLock, designPartBusyResponse } from "../shared";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -210,8 +210,8 @@ export async function POST(request: Request) {
       : errorResponse("요청을 읽을 수 없습니다.");
   }
   if (request.signal.aborted) return errorResponse("요청이 취소되었습니다.", 499);
-  const lock = acquireDesignLock(input.projectId);
-  if (!lock) return designBusyResponse();
+  const lock = acquireDesignPartLock(input.projectId, input.part);
+  if (!lock) return designPartBusyResponse();
   let handedOff = false;
   try {
     const project = await getProject(input.projectId);
