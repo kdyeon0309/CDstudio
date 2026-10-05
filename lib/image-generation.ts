@@ -7,6 +7,10 @@ import os from "os";
 import { randomUUID } from "crypto";
 import type { StudioArtworkPart } from "./types";
 import { STUDIO_PART_LABELS } from "./types";
+import {
+  ArtifactRecoveryError, recoverCodexThreadArtifact, summarizeCodexJsonl,
+  type CodexJsonlSummary,
+} from "./image-artifacts";
 
 const CODEX = process.env.CDSTUDIO_CODEX_BIN ?? "codex";
 const FFPROBE = "/opt/homebrew/bin/ffprobe";
@@ -14,9 +18,87 @@ const FFMPEG = "/opt/homebrew/bin/ffmpeg";
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const MAX_IMAGE_EDGE = 4096;
 const MAX_CLI_OUTPUT = 2 * 1024 * 1024;
-const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
+const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
+const IMAGE_RESULT_SCHEMA = {
+  type: "object", additionalProperties: false, required: ["status", "reason", "explanation"],
+  properties: {
+    status: { type: "string", enum: ["success", "failed"] },
+    reason: { type: "string", enum: ["none", "tool_unavailable", "tool_error", "request_refused", "moderation_blocked", "copy_failed", "unknown"] },
+    explanation: { type: "string", maxLength: 600 },
+  },
+} as const;
 
 export class ImageGenerationError extends Error {}
+
+class GeneratedPngAccessError extends ImageGenerationError {
+  constructor(public readonly code: string | undefined) {
+    super(code === "ENOENT"
+      ? "Codex가 이미지 파일을 만들지 않았습니다."
+      : "생성 이미지 파일에 접근할 수 없습니다.");
+  }
+}
+
+function safeDiagnostic(options: {
+  diagnosticId: string;
+  stage: string;
+  exitCode: number;
+  startedAt: number;
+  summary: CodexJsonlSummary;
+  fileCode?: string;
+}): void {
+  console.warn("[CDstudio:image-generation]", JSON.stringify({
+    diagnosticId: options.diagnosticId,
+    stage: options.stage,
+    exitCode: options.exitCode,
+    elapsedMs: Math.max(0, Date.now() - options.startedAt),
+    eventCounts: options.summary.eventCounts,
+    failedItemTypes: options.summary.failedItemTypes,
+    completedItemTypes: options.summary.completedItemTypes,
+    thread: {
+      present: Boolean(options.summary.threadId), invalid: options.summary.invalidThreadId,
+      conflicting: options.summary.conflictingThreadIds,
+    },
+    ...(options.summary.imageResult ? { imageResult: {
+      status: options.summary.imageResult.status, reason: options.summary.imageResult.reason,
+    } } : {}),
+    ...(options.fileCode ? { fileCode: options.fileCode } : {}),
+  }));
+}
+
+function unavailableMessage(summary: CodexJsonlSummary, fallback: string): string {
+  if (summary.imageResult?.status !== "failed") {
+    return `${fallback} Codex가 실패 이유를 보고하지 않았습니다.`;
+  }
+  const labels = {
+    tool_unavailable: "이미지 도구를 사용할 수 없다고",
+    tool_error: "이미지 도구 실행 중 오류가 발생했다고",
+    request_refused: "요청을 수행할 수 없다고",
+    moderation_blocked: "이미지 서비스의 안전 검사에서 차단됐다고",
+    copy_failed: "생성 이미지 복사에 실패했다고",
+    unknown: "실패했지만 이유를 알 수 없다고",
+  } as const;
+  const explanation = cleanExplanation(summary.imageResult.explanation);
+  const guidance = summary.imageResult.reason === "moderation_blocked"
+    ? " 같은 요청의 반복 대신 프롬프트·참고 이미지 검토가 필요합니다." : "";
+  return `${fallback} Codex가 ${labels[summary.imageResult.reason as keyof typeof labels]} 응답했습니다.${guidance}${explanation ? ` 설명: ${explanation}` : ""}`;
+}
+
+function cleanExplanation(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const normalized = value
+    .replace(/[\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/g, "")
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
+  if (/[\\/]/.test(normalized)
+    || /(?:www\.|\b[a-z][a-z0-9+.-]*:\/\/|\bBearer\s+\S+|\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|(?:api[_-]?key|access[_-]?token|secret|password)\s*[:=]|(?:sk|pk|sess|api)[-_][A-Za-z0-9_-]{12,})/i.test(normalized)) {
+    return undefined;
+  }
+  const cleaned = normalized.replace(/\s+/g, " ").trim();
+  return cleaned ? cleaned.slice(0, 600) : undefined;
+}
+
+function diagnosticMessage(message: string, diagnosticId: string): ImageGenerationError {
+  return new ImageGenerationError(`${message} (진단 ID: ${diagnosticId})`);
+}
 
 /** 앱 실행 환경에 API 인증이 있어도 이미지 생성은 Codex의 ChatGPT 로그인만 이용한다. */
 function codexEnvironment(): NodeJS.ProcessEnv {
@@ -158,7 +240,7 @@ function formatRequirements(part: StudioArtworkPart): string {
     return "Square CD label artwork. Keep the central 23 mm diameter hole and outer 116 mm circular cut clear of essential details. The image will be placed within a 116 mm circle on A4 paper.";
   }
   if (part === "back") {
-    return "Create flat landscape back-cover artwork focused on the central 137 x 118 mm panel. Do not draw side-spine artwork, a jewel case mockup, or fold/crop lines. Without a separate spine image this artwork can fill the full 150 x 118 mm tray card, so keep the outer 6.5 mm on each side visually continuous and free of essential details.";
+    return "Create flat landscape back-cover artwork for only the central 137 x 118 mm panel. The image canvas must not include either side-spine area. Do not draw side-spine artwork, a jewel case mockup, or fold/crop lines. Keep every requested essential element—including any requested barcode, logo, album title, artist name, and track text—inside a safe margin within this central panel so it cannot be cropped at the panel edges. Do not invent a barcode or logo when the user did not request one. The two 6.5 mm side folds are composed separately by the app.";
   }
   if (part === "back-inner") {
     return "Landscape CD tray inner artwork for 150 x 118 mm printing. Reserve both 6.5 mm side folds and a safe margin.";
@@ -173,7 +255,10 @@ function printResolutionTarget(part: StudioArtworkPart): string {
   if (part === "label") {
     return "Physical print diameter: 116 mm. Aim for a square native raster of at least 1371 x 1371 pixels (300 PPI across the full diameter).";
   }
-  if (part === "back" || part === "back-inner") {
+  if (part === "back") {
+    return "Physical print size: 137 x 118 mm. Aim for at least 1619 x 1394 native pixels (300 PPI across the spine-free central back panel).";
+  }
+  if (part === "back-inner") {
     return "Physical print size: 150 x 118 mm. Aim for at least 1772 x 1394 native pixels (300 PPI across the full tray card), even if a separate spine is selected.";
   }
   return "Physical print size: 120 x 120 mm. Aim for a square native raster of at least 1418 x 1418 pixels (300 PPI).";
@@ -185,6 +270,7 @@ export function buildCodexPrompt(
 ): string {
   return [
     "Use the built-in image generation tool available to this Codex session to create a real raster image.",
+    "This artwork is for the user's private, offline CD collection. It is not an official commercial release or a request to distribute or sell packaging.",
     "Do not use an API key, openai images CLI, SDK, external endpoint, SVG, canvas, HTML, or code-drawn substitute.",
     `Create artwork for ${STUDIO_PART_LABELS[part]}. ${formatRequirements(part)}`,
     printResolutionTarget(part),
@@ -202,20 +288,9 @@ export function buildCodexPrompt(
       : "",
     `After generation, copy the actual generated PNG raster to this exact path: ${outputPath}`,
     "The built-in image tool may save first under CODEX_HOME/generated_images; copy that output file. Do not fabricate a file or report success without a real image.",
+    "Generate exactly one final raster for this request. If copying the already generated PNG fails, do not generate another image solely to retry the copy; keep the native output intact.",
+    "Your final response must be only the required JSON result. Report success only after a real PNG exists. On failure report the actual known reason; use moderation_blocked only when the image tool actually reports that code or an output safety-review block, and never guess it from brands or prompt content; use unknown when the reason is not known. Give a concise, specific failure cause in explanation without including the raw user prompt, account data, secrets, URLs, or local paths. Preserve all user requirements and exact requested visible text; you may organize the image-tool instruction into a faithful spec without silently dropping requirements.",
   ].join("\n");
-}
-
-function completedTurn(stdout: string): boolean {
-  let completed = false;
-  for (const line of stdout.split("\n")) {
-    if (!line.startsWith("{")) continue;
-    try {
-      const event = JSON.parse(line) as { type?: string };
-      if (event.type === "turn.failed") return false;
-      if (event.type === "turn.completed") completed = true;
-    } catch { /* malformed line is ignored; output file still must validate */ }
-  }
-  return completed;
 }
 
 export async function generateCodexImage(options: {
@@ -235,28 +310,99 @@ export async function generateCodexImage(options: {
   const status = await codexImageAvailability(options.signal);
   if (!status.connected) throw new ImageGenerationError(status.message);
   const requestedModel = process.env.CDSTUDIO_IMAGE_CODEX_MODEL?.trim();
-  const args = [
-    "exec", "--json", "--ephemeral", "--ignore-user-config", "--skip-git-repo-check",
-    "-C", options.cwd, "-s", "workspace-write",
-  ];
-  if (requestedModel) args.push("-m", requestedModel);
-  // `-` reads the full prompt from stdin, avoiding the per-argument OS size limit.
-  // It must precede -i because -i accepts multiple paths.
-  args.push("-");
-  if (options.referencePaths.length > 0) args.push("-i", ...options.referencePaths);
   const timeout = Number(process.env.CDSTUDIO_IMAGE_TIMEOUT_MS);
   const timeoutMs = Number.isFinite(timeout) && timeout >= 30_000 && timeout <= 15 * 60_000
     ? timeout : DEFAULT_TIMEOUT_MS;
-  const run = await runProcess(CODEX, args, {
-    cwd: options.cwd,
-    signal: options.signal,
-    timeoutMs,
-    stdin: buildCodexPrompt(options.part, options.prompt, options.outputPath, referenceNames),
-  });
-  if (run.exitCode !== 0 || !completedTurn(run.stdout)) {
-    throw new ImageGenerationError("Codex 이미지 생성이 완료되지 않았습니다. 로그인 상태와 이미지 생성 기능을 확인해 주세요.");
+  const startedAt = Date.now();
+  const diagnosticId = randomUUID();
+  const schemaPath = path.join(options.cwd, `.cdstudio-image-result-${randomUUID()}.schema.json`);
+  let ownsSchema = false;
+  if (options.signal?.aborted) throw new ImageGenerationError("이미지 생성이 취소되었습니다.");
+  try {
+    await fs.writeFile(schemaPath, JSON.stringify(IMAGE_RESULT_SCHEMA), { flag: "wx", mode: 0o600 });
+    ownsSchema = true;
+    if (options.signal?.aborted) throw new ImageGenerationError("이미지 생성이 취소되었습니다.");
+    const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
+    const args = [
+      "exec", "--json", "--ephemeral", "--ignore-user-config", "--skip-git-repo-check",
+      "-C", options.cwd, "-s", "workspace-write",
+    ];
+    if (requestedModel) args.push("-m", requestedModel);
+    args.push("--output-schema", schemaPath, "-");
+    if (options.referencePaths.length > 0) args.push("-i", ...options.referencePaths);
+    const run = await runProcess(CODEX, args, {
+      cwd: options.cwd,
+      signal: options.signal,
+      timeoutMs,
+      stdin: buildCodexPrompt(options.part, options.prompt, options.outputPath, referenceNames),
+    });
+    const summary = summarizeCodexJsonl(run.stdout);
+    if (run.exitCode !== 0 || !summary.turnCompleted || summary.turnFailed || summary.fatalErrorCount > 0) {
+      safeDiagnostic({ diagnosticId, stage: "tool", exitCode: run.exitCode, startedAt, summary });
+      throw diagnosticMessage(unavailableMessage(summary,
+        "Codex 이미지 생성이 완료되지 않았습니다."), diagnosticId);
+    }
+    try {
+      return await validateGeneratedPng(options.cwd, options.outputPath, options.signal);
+    } catch (error) {
+      if (!(error instanceof GeneratedPngAccessError) || error.code !== "ENOENT") {
+        safeDiagnostic({
+          diagnosticId, stage: error instanceof GeneratedPngAccessError ? "file-access" : "validation",
+          exitCode: run.exitCode, startedAt, summary,
+          fileCode: error instanceof GeneratedPngAccessError ? error.code : undefined,
+        });
+        if (error instanceof ImageGenerationError && /취소되었습니다/.test(error.message)) throw error;
+        throw diagnosticMessage(error instanceof ImageGenerationError ? error.message : "생성 이미지 검증에 실패했습니다.", diagnosticId);
+      }
+    }
+    if (!summary.threadId || summary.eventCounts.threadStarted !== 1
+        || summary.invalidThreadId || summary.conflictingThreadIds || summary.eventCounts.malformed > 0) {
+      safeDiagnostic({ diagnosticId, stage: "thread-id-unusable", exitCode: run.exitCode, startedAt, summary });
+      throw diagnosticMessage(unavailableMessage(summary, "Codex가 이미지 파일을 만들지 않았습니다."), diagnosticId);
+    }
+    try {
+      await recoverCodexThreadArtifact({
+        codexHome,
+        threadId: summary.threadId,
+        outputPath: options.outputPath,
+        startedAt,
+        maxBytes: MAX_IMAGE_BYTES,
+        signal: options.signal,
+      });
+      return await validateGeneratedPng(options.cwd, options.outputPath, options.signal);
+    } catch (error) {
+      if (error instanceof ArtifactRecoveryError) {
+        if (error.kind === "cancelled") throw new ImageGenerationError("이미지 생성이 취소되었습니다.");
+        safeDiagnostic({
+          diagnosticId,
+          stage: error.kind === "missing"
+            ? error.safeLocation === "root" ? "artifact-root-missing"
+              : error.safeLocation === "thread-directory" ? "artifact-thread-directory-missing"
+                : "artifact-empty-directory"
+            : error.kind === "access" ? "artifact-access" : `artifact-${error.kind}`,
+          exitCode: run.exitCode,
+          startedAt,
+          summary,
+          fileCode: error.safeCode,
+        });
+        if (error.kind === "access") {
+          throw diagnosticMessage("Codex 이미지 결과 파일에 접근할 수 없습니다.", diagnosticId);
+        }
+        if (error.kind === "ambiguous") {
+          throw diagnosticMessage("Codex 이미지 결과가 여러 개여서 안전하게 선택할 수 없습니다.", diagnosticId);
+        }
+        if (error.kind === "invalid") {
+          throw diagnosticMessage("Codex 이미지 결과 파일이 안전한 PNG 조건을 충족하지 않습니다.", diagnosticId);
+        }
+        throw diagnosticMessage(unavailableMessage(summary, "Codex가 이미지 파일을 만들지 않았습니다."), diagnosticId);
+      }
+      safeDiagnostic({ diagnosticId, stage: "recovered-validation", exitCode: run.exitCode, startedAt, summary });
+      if (error instanceof ImageGenerationError && /취소되었습니다/.test(error.message)) throw error;
+      throw diagnosticMessage(error instanceof ImageGenerationError ? error.message : "복구한 이미지 검증에 실패했습니다.", diagnosticId);
+    }
+  } finally {
+    if (ownsSchema) await fs.unlink(schemaPath).catch(() => undefined);
   }
-  return validateGeneratedPng(options.cwd, options.outputPath, options.signal);
 }
 
 /** CLI의 성공 문구를 신뢰하지 않는다. 새 출력 파일의 경로·크기·디코딩을 검증한다. */
@@ -272,7 +418,11 @@ export async function validateGeneratedPng(
     throw new ImageGenerationError("출력 경로가 올바르지 않습니다.");
   }
   let stat;
-  try { stat = await fs.lstat(expected); } catch { throw new ImageGenerationError("Codex가 이미지 파일을 만들지 않았습니다."); }
+  try { stat = await fs.lstat(expected); } catch (error) {
+    const code = error && typeof error === "object" && "code" in error && typeof error.code === "string"
+      ? error.code : undefined;
+    throw new GeneratedPngAccessError(code);
+  }
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 100 || stat.size > MAX_IMAGE_BYTES) {
     throw new ImageGenerationError("생성 이미지의 파일 형식 또는 크기가 올바르지 않습니다.");
   }
