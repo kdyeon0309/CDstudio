@@ -1,0 +1,165 @@
+.wrapper {
+  flex: none;
+  page: cd-front-fold;
+}
+
+.foldSheet {
+  position: relative;
+  width: 297mm;
+  height: 210mm;
+  overflow: hidden;
+  background: white;
+  box-shadow: 0 24px 70px rgb(0 0 0 / 45%);
+  break-after: auto;
+  page-break-after: auto;
+  zoom: 0.98;
+}
+
+.sheetLabel {
+  position: absolute;
+  top: 8mm;
+  left: 50%;
+  translate: -50% 0;
+  color: #52525b;
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+
+.foldStrip {
+  position: absolute;
+  top: 45mm;
+  left: 28.5mm;
+  display: flex;
+  width: 240mm;
+  height: 120mm;
+}
+
+.foldPanel {
+  position: relative;
+  flex: none;
+  width: 120mm;
+  height: 120mm;
+  overflow: hidden;
+  color-scheme: light;
+}
+
+.outerCropMarks {
+  position: absolute;
+  z-index: 10;
+  inset: 0;
+  pointer-events: none;
+}
+
+.outerCropMarks i {
+  position: absolute;
+  width: 6mm;
+  height: 6mm;
+}
+
+.outerCropMarks i::before,
+.outerCropMarks i::after {
+  position: absolute;
+  content: "";
+  background: #111;
+}
+
+.outerCropMarks i::before {
+  width: 4mm;
+  height: 0.2mm;
+}
+
+.outerCropMarks i::after {
+  width: 0.2mm;
+  height: 4mm;
+}
+
+.cropTopLeft { top: -6mm; left: -6mm; }
+.cropTopRight { top: -6mm; right: -6mm; }
+.cropBottomLeft { bottom: -6mm; left: -6mm; }
+.cropBottomRight { right: -6mm; bottom: -6mm; }
+.cropTopLeft::before, .cropBottomLeft::before { left: 0; }
+.cropTopRight::before, .cropBottomRight::before { right: 0; }
+.cropTopLeft::after, .cropTopRight::after { top: 0; }
+.cropBottomLeft::after, .cropBottomRight::after { bottom: 0; }
+.cropTopLeft::before, .cropTopRight::before { bottom: 0; }
+.cropBottomLeft::before, .cropBottomRight::before { top: 0; }
+.cropTopLeft::after, .cropBottomLeft::after { right: 0; }
+.cropTopRight::after, .cropBottomRight::after { left: 0; }
+
+.screenFoldLine {
+  position: absolute;
+  z-index: 9;
+  top: 0;
+  bottom: 0;
+  left: 120mm;
+  border-left: 0.25mm dashed rgb(24 24 27 / 65%);
+  pointer-events: none;
+}
+
+.foldTick {
+  position: absolute;
+  z-index: 10;
+  left: 120mm;
+  height: 2mm;
+  border-left: 0.25mm solid #111;
+  pointer-events: none;
+}
+
+.foldTickTop { top: -4mm; }
+.foldTickBottom { bottom: -4mm; }
+
+@media screen and (max-width: 1200px) {
+  .foldSheet { zoom: 0.72; }
+}
+
+@media screen and (max-width: 900px) {
+  .foldSheet { zoom: 0.55; }
+}
+
+@media screen and (max-width: 680px) {
+  .foldSheet { zoom: 0.42; }
+}
+
+@media screen and (max-width: 540px) {
+  .foldSheet { zoom: 0.33; }
+}
+
+@media screen and (max-width: 420px) {
+  .foldSheet { zoom: 0.29; }
+}
+
+@media screen and (max-width: 380px) {
+  .foldSheet { zoom: 0.27; }
+}
+
+@media screen and (max-width: 365px) {
+  .foldSheet { zoom: 0.26; }
+}
+
+@media screen and (max-width: 340px) {
+  .foldSheet { zoom: 0.24; }
+}
+
+@page cd-front-fold {
+  size: A4 landscape;
+  margin: 0;
+}
+
+@media print {
+  .wrapper {
+    display: block;
+    width: 297mm !important;
+    height: 210mm !important;
+  }
+
+  .foldSheet {
+    zoom: 1 !important;
+    margin: 0;
+    box-shadow: none;
+  }
+
+  .sheetLabel,
+  .screenFoldLine {
+    display: none;
+  }
+}
