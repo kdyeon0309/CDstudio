@@ -17,7 +17,13 @@ import {
   PART_LABELS,
   PRINT_SPECS,
 } from "@/lib/types";
-import { readDesignStream } from "./read-design-stream";
+import {
+  cancelBackgroundJob,
+  listBackgroundJobs,
+  startBackgroundJobIfActive,
+  watchBackgroundJob,
+  type BackgroundJobObserver,
+} from "@/lib/background-job-client";
 
 const PX_PER_MM = 96 / 25.4;
 const PREVIEW_SCALE = 0.3;
@@ -128,6 +134,9 @@ export default function DesignClient({ projectId }: { projectId: string }) {
   const [deletingAsset, setDeletingAsset] = useState<string | null>(null);
 
   const [busy, setBusy] = useState<Busy>(null);
+  const [jobsReady, setJobsReady] = useState(false);
+  const [recoveryAttempt, setRecoveryAttempt] = useState(0);
+  const [recoveryFailed, setRecoveryFailed] = useState(false);
   const [refiningIndex, setRefiningIndex] = useState<number | null>(null);
   const [activePart, setActivePart] = useState<{
     variant: number;
@@ -139,7 +148,8 @@ export default function DesignClient({ projectId }: { projectId: string }) {
   /** iframe 캐시 무효화용 리비전. 키: `${안번호}:${영역}` */
   const [rev, setRev] = useState<Record<string, number>>({});
 
-  const abortRef = useRef<AbortController | null>(null);
+  const observerRef = useRef<BackgroundJobObserver | null>(null);
+  const jobIdRef = useRef<string | null>(null);
   const deletingAssetRef = useRef(false);
   const logEndRef = useRef<HTMLDivElement>(null);
   /** 제작 방식 PATCH 직렬화 (연타 시 경합 방지) */
@@ -150,6 +160,11 @@ export default function DesignClient({ projectId }: { projectId: string }) {
   const promptsDirtyRef = useRef(false);
   /** 마지막 영역별 지시 저장 (blur 직후 버튼 클릭 시 완료를 기다리기 위함) */
   const promptsSaveRef = useRef<Promise<boolean>>(Promise.resolve(true));
+  const mountedRef = useRef(true);
+  const recoveryStartedRef = useRef(false);
+  const projectReady = project !== null;
+
+  useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
 
   // ── 로드 ──────────────────────────────────────────────────
   const loadProject = useCallback(
@@ -198,7 +213,7 @@ export default function DesignClient({ projectId }: { projectId: string }) {
     void loadAssets();
   }, [loadProject, loadAssets]);
 
-  useEffect(() => () => abortRef.current?.abort(), []);
+  useEffect(() => () => observerRef.current?.stop(), []);
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ block: "nearest" });
@@ -443,32 +458,70 @@ export default function DesignClient({ projectId }: { projectId: string }) {
     [bumpRev],
   );
 
-  /** SSE 엔드포인트 공통 실행기 */
+  function observeDesignJob(job: import("@/lib/background-job-types").BackgroundJob) {
+    jobIdRef.current = job.id;
+    observerRef.current?.stop();
+    observerRef.current = watchBackgroundJob(job, {
+      onEvent: (event) => handleEvent(event as DesignEvent),
+      onReconnect: () => setLogs((current) => [...current, "서버 작업에 다시 연결하는 중입니다…"]),
+    });
+    return observerRef.current.finished.then((terminal) => {
+      if (!terminal) return false;
+      jobIdRef.current = null;
+      observerRef.current = null;
+      if (terminal.status === "error") setRunError(terminal.error ?? "디자인 작업에 실패했습니다.");
+      else if (terminal.status === "cancelled") setRunError("디자인 작업을 중단했습니다.");
+      setBusy(null);
+      setRefiningIndex(null);
+      setActivePart(null);
+      void loadProject();
+      return terminal.status === "success";
+    });
+  }
+
+  useEffect(() => {
+    if (!projectReady || recoveryStartedRef.current) return;
+    recoveryStartedRef.current = true;
+    setRecoveryFailed(false);
+    const recovery = new AbortController();
+    listBackgroundJobs(projectId, recovery.signal).then((jobs) => {
+      if (!recovery.signal.aborted) setJobsReady(true);
+      const legacyJobs = jobs.filter((item) =>
+        item.endpoint === "/api/design" || item.endpoint === "/api/design/refine" || item.endpoint === "/api/design/part");
+      const job = legacyJobs.filter((item) => item.status === "running")
+        .sort((a, b) => b.startedAt - a.startedAt)[0];
+      if (!job || recovery.signal.aborted) {
+        const latest = legacyJobs.sort((a, b) =>
+          (b.finishedAt ?? b.startedAt) - (a.finishedAt ?? a.startedAt))[0];
+        if (latest?.status === "error") setRunError(latest.error ?? "이전 디자인 작업에 실패했습니다.");
+        else if (latest?.status === "cancelled") setRunError("이전 디자인 작업이 중단됐습니다.");
+        void loadProject();
+        return;
+      }
+      setBusy(job.endpoint === "/api/design" ? "generate" : job.endpoint === "/api/design/refine" ? "refine" : "part");
+      setLogs(["진행 중인 서버 작업을 복구했습니다."]);
+      observeDesignJob(job);
+    }).catch((error: unknown) => {
+      if (!recovery.signal.aborted) {
+        recoveryStartedRef.current = false;
+        setRecoveryFailed(true);
+        setRunError(`${error instanceof Error ? error.message : String(error)} ‘작업 다시 확인’을 눌러 주세요.`);
+      }
+    });
+    return () => recovery.abort();
+  // observeDesignJob intentionally uses the current observer callbacks during one-time recovery.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId, projectReady, recoveryAttempt]);
+
+  /** 서버 소유 백그라운드 작업 공통 실행기 */
   async function runDesignStream(url: string, body: Record<string, unknown>) {
-    const controller = new AbortController();
-    abortRef.current = controller;
     try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => null);
-        throw new Error(
-          (data as { error?: string } | null)?.error ?? `요청 실패 (${res.status})`,
-        );
-      }
-      await readDesignStream(res, handleEvent);
-      return true;
+      const job = await startBackgroundJobIfActive(url as "/api/design" | "/api/design/refine" | "/api/design/part", body, () => mountedRef.current);
+      if (!job) return false;
+      return await observeDesignJob(job);
     } catch (err) {
-      if (!controller.signal.aborted) {
-        setRunError(err instanceof Error ? err.message : String(err));
-      }
+      setRunError(err instanceof Error ? err.message : String(err));
       return false;
-    } finally {
-      abortRef.current = null;
     }
   }
 
@@ -481,7 +534,7 @@ export default function DesignClient({ projectId }: { projectId: string }) {
 
   // ── 3안 생성 ──────────────────────────────────────────────
   async function handleGenerate(regenerateMissing = false) {
-    if (busy) return;
+    if (busy || !jobsReady) return;
     const missing = missingPhotoParts();
     if (missing.length > 0) {
       setRunError(
@@ -511,7 +564,7 @@ export default function DesignClient({ projectId }: { projectId: string }) {
 
   // ── 피드백 반영(refine) ───────────────────────────────────
   async function handleRefine(index: number) {
-    if (busy) return;
+    if (busy || !jobsReady) return;
     const text = (feedback[index] ?? "").trim();
     if (!text) return;
     setBusy("refine");
@@ -539,7 +592,7 @@ export default function DesignClient({ projectId }: { projectId: string }) {
 
   // ── 영역 재생성 ───────────────────────────────────────────
   async function handleRegeneratePart(index: number, part: ArtworkPart) {
-    if (busy) return;
+    if (busy || !jobsReady) return;
     if (partModes[part] === "photo" && !partPhotos[part]) {
       setRunError(`${PART_LABELS[part]} 영역에 쓸 사진을 먼저 고르세요.`);
       return;
@@ -651,10 +704,11 @@ export default function DesignClient({ projectId }: { projectId: string }) {
 
   const variants = [...(project.artwork?.variants ?? [])].sort((a, b) => a.index - b.index);
   const selected = project.artwork?.selected;
-  const running = busy !== null;
+  const running = busy !== null || !jobsReady;
 
   return (
     <div className="grid gap-8 lg:grid-cols-[340px_minmax(0,1fr)]">
+      {!jobsReady && recoveryFailed && <button type="button" onClick={() => setRecoveryAttempt((value) => value + 1)} className="rounded-lg border border-amber/50 px-3 py-2 text-sm text-amber">작업 다시 확인</button>}
       {/* ── 좌: 입력 패널 ── */}
       <aside className="space-y-6 lg:sticky lg:top-6 lg:self-start">
         <section className="rounded-xl border border-line bg-panel/60 p-5">
@@ -929,14 +983,19 @@ export default function DesignClient({ projectId }: { projectId: string }) {
           {running && (
             <button
               type="button"
-              onClick={() => abortRef.current?.abort()}
+              onClick={() => {
+                const id = jobIdRef.current;
+                if (id) void cancelBackgroundJob(projectId, id).catch((error: unknown) => {
+                  setRunError(error instanceof Error ? error.message : "중단 요청에 실패했습니다.");
+                });
+              }}
               className="w-full rounded-xl border border-rose/50 px-4 py-2 text-sm text-rose transition hover:bg-rose/10"
             >
               중단
             </button>
           )}
           <p className="text-xs text-fg-dim">
-            로컬 AI CLI 를 호출합니다. 안당 수 분 걸릴 수 있으니 이 탭을 열어 두세요.
+            로컬 AI CLI 를 호출합니다. 안당 수 분 걸릴 수 있습니다. 다른 화면으로 이동해도 서버에서 계속 진행됩니다.
           </p>
         </section>
 
@@ -969,12 +1028,20 @@ export default function DesignClient({ projectId }: { projectId: string }) {
             </span>
           </h2>
           {selected && (
-            <Link
-              href={`/album/${projectId}/print`}
-              className="rounded-lg border border-teal/50 px-3 py-1.5 text-sm text-teal transition hover:bg-teal/10"
-            >
-              인쇄 단계로 →
-            </Link>
+            <div className="flex flex-wrap gap-2">
+              <Link
+                href={`/album/${projectId}/preview`}
+                className="rounded-lg border border-amber/50 px-3 py-1.5 text-sm text-amber transition hover:bg-amber/10"
+              >
+                완성 모습 3D →
+              </Link>
+              <Link
+                href={`/album/${projectId}/print`}
+                className="rounded-lg border border-teal/50 px-3 py-1.5 text-sm text-teal transition hover:bg-teal/10"
+              >
+                인쇄 단계로 →
+              </Link>
+            </div>
           )}
         </div>
 
