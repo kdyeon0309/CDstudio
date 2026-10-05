@@ -16,7 +16,6 @@ import {
 } from "./types";
 
 export const MAX_STUDIO_BODY_BYTES = 1024 * 1024;
-export const MAX_STUDIO_REFS = 4;
 export const MAX_STUDIO_REFERENCE_LABEL = 40;
 export const MAX_STUDIO_CANDIDATES = 100;
 export const MAX_STUDIO_SNAPSHOTS = 30;
@@ -70,12 +69,11 @@ export function isSafeStudioImageFilename(value: unknown): value is string {
 }
 
 export async function validateStudioReferenceFiles(projectId: string, input: unknown): Promise<string[]> {
-  if (!Array.isArray(input) || input.length > MAX_STUDIO_REFS) {
-    throw new StudioError(`참고 이미지는 최대 ${MAX_STUDIO_REFS}개까지 선택할 수 있습니다.`);
-  }
+  if (!Array.isArray(input)) throw new StudioError("참고 이미지 목록이 올바르지 않습니다.");
   const files: string[] = [];
+  const seen = new Set<string>();
   for (const value of input) {
-    if (!isSafeStudioImageFilename(value) || files.includes(value)) {
+    if (!isSafeStudioImageFilename(value) || seen.has(value)) {
       throw new StudioError("참고 이미지 파일명이 올바르지 않습니다.");
     }
     let stat;
@@ -85,6 +83,7 @@ export async function validateStudioReferenceFiles(projectId: string, input: unk
       throw new StudioError(`참고 이미지를 찾을 수 없습니다: ${value}`, 404);
     }
     if (!stat.isFile()) throw new StudioError("참고 이미지는 일반 파일이어야 합니다.");
+    seen.add(value);
     files.push(value);
   }
   return files;
@@ -213,7 +212,7 @@ export type StudioAction =
   | { action: "restore"; snapshotId: string }
   | { action: "print-source"; printSource: "studio" | "legacy" };
 
-/** 호출자는 design:${projectId} 작업 락을 보유해야 한다. */
+/** 호출자는 영역 작업이면 design:${projectId}:${part}, 전역 작업이면 design:${projectId} 락을 보유해야 한다. */
 export async function applyStudioAction(projectId: string, action: StudioAction): Promise<AlbumProject> {
   const saved = await updateProjectWith(projectId, (project) => {
     const studio = project.studio ?? defaultArtworkStudio(project);
@@ -312,7 +311,7 @@ export async function applyStudioAction(projectId: string, action: StudioAction)
   return saved;
 }
 
-/** 호출자는 design:${projectId} 작업 락을 보유해야 한다. 후보는 자동 선택하지 않는다. */
+/** 호출자는 design:${projectId}:${part} 작업 락을 보유해야 한다. 후보는 자동 선택하지 않는다. */
 export async function appendStudioCandidate(
   projectId: string,
   part: StudioArtworkPart,
@@ -348,7 +347,7 @@ export async function appendStudioCandidate(
   return saved;
 }
 
-/** 호출자는 design:${projectId} 작업 락을 보유해야 한다. 업로드 등록·선택·배치를 한 번의 저장으로 반영한다. */
+/** 호출자는 design:${projectId}:${part} 작업 락을 보유해야 한다. 업로드 등록·선택·배치를 한 번의 저장으로 반영한다. */
 export async function importStudioCandidate(
   projectId: string,
   part: StudioArtworkPart,
