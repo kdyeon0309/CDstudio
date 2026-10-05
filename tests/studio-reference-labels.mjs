@@ -11,6 +11,7 @@ const ts = require("typescript");
 const root = path.resolve(import.meta.dirname, "..");
 
 async function loadTs(relativePath, mocks = {}) {
+  const imageArtifacts = relativePath === "lib/image-generation.ts" ? await loadTs("lib/image-artifacts.ts") : undefined;
   const filename = path.join(root, relativePath);
   const source = await fs.readFile(filename, "utf8");
   const compiled = ts.transpileModule(source, {
@@ -20,7 +21,8 @@ async function loadTs(relativePath, mocks = {}) {
   loaded.filename = filename;
   loaded.paths = Module._nodeModulePaths(path.dirname(filename));
   const originalRequire = loaded.require.bind(loaded);
-  loaded.require = (id) => Object.hasOwn(mocks, id) ? mocks[id] : originalRequire(id);
+  loaded.require = (id) => Object.hasOwn(mocks, id) ? mocks[id]
+    : id === "./image-artifacts" && imageArtifacts ? imageArtifacts : originalRequire(id);
   loaded._compile(compiled, filename);
   return loaded.exports;
 }
@@ -59,6 +61,37 @@ test("temporary labels resolve in attachment order and reject ambiguous names", 
     { "face.png": 123 },
   ]) {
     assert.throws(() => studio.validateStudioReferenceLabels(refs, labels), studio.StudioError);
+  }
+});
+
+test("reference file validation accepts ordered arrays beyond four and keeps safety checks", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "cdstudio-reference-files-test-"));
+  try {
+    const filenames = Array.from({ length: 8 }, (_, index) => `reference-${index + 1}.png`);
+    for (const [index, filename] of filenames.entries()) {
+      await fs.writeFile(path.join(directory, filename), `REF-${index + 1}`);
+    }
+    const validatingStudio = await loadTs("lib/studio.ts", {
+      "./storage": { assetsDir: () => directory },
+      "./types": {
+        ARTWORK_PARTS: ["front", "front-inner", "back", "back-inner", "label"],
+        STUDIO_ARTWORK_PARTS: ["front", "front-inner", "back", "back-spine", "back-inner", "label"],
+      },
+    });
+    assert.deepEqual(
+      await validatingStudio.validateStudioReferenceFiles("project", filenames),
+      filenames,
+      "all safe references retain their exact order",
+    );
+    await assert.rejects(validatingStudio.validateStudioReferenceFiles("project", "reference-1.png"), /목록/);
+    await assert.rejects(validatingStudio.validateStudioReferenceFiles("project", [filenames[0], filenames[0]]), /파일명/);
+    await assert.rejects(validatingStudio.validateStudioReferenceFiles("project", ["../reference.png"]), /파일명/);
+    await assert.rejects(validatingStudio.validateStudioReferenceFiles("project", ["reference.gif"]), /파일명/);
+    await assert.rejects(validatingStudio.validateStudioReferenceFiles("project", ["missing.png"]), /찾을 수 없습니다/);
+    await fs.symlink(path.join(directory, filenames[0]), path.join(directory, "linked.png"));
+    await assert.rejects(validatingStudio.validateStudioReferenceFiles("project", ["linked.png"]), /일반 파일/);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
   }
 });
 
@@ -137,9 +170,21 @@ test("long studio prompts save and generate while preserving ordered name proven
   try {
     const assets = path.join(directory, "assets");
     await fs.mkdir(assets);
-    for (const [filename, value] of [["face.png", "FACE"], ["sky.png", "SKY"], ["parent.png", "PARENT"]]) {
+    const manyReferences = Array.from({ length: 6 }, (_, index) => `reference-${index + 1}.png`);
+    const manyLabels = Object.fromEntries(manyReferences.map((filename, index) => [filename, `참고 ${index + 1}`]));
+    for (const [filename, value] of [
+      ["face.png", "FACE"], ["sky.png", "SKY"], ["parent.png", "PARENT"],
+      ...manyReferences.map((filename, index) => [filename, `REF-${index + 1}`]),
+    ]) {
       await fs.writeFile(path.join(assets, filename), value);
     }
+    const routeStudio = await loadTs("lib/studio.ts", {
+      "./storage": { assetsDir: () => assets },
+      "./types": {
+        ARTWORK_PARTS: ["front", "front-inner", "back", "back-inner", "label"],
+        STUDIO_ARTWORK_PARTS: ["front", "front-inner", "back", "back-spine", "back-inner", "label"],
+      },
+    });
     const projectId = "12345678-1234-1234-1234-123456789abc";
     const parentId = "87654321-4321-4321-4321-cba987654321";
     const candidate = { id: parentId, filename: "parent.png", referenceFiles: [], prompt: "", width: 512, height: 512, createdAt: "2026-01-01" };
@@ -151,23 +196,36 @@ test("long studio prompts save and generate while preserving ordered name proven
       "@/lib/studio": {
         applyStudioAction: async (_projectId, action) => {
           project.studio.parts.front.prompt = action.prompt;
+          project.studio.parts.front.referenceFiles = [...action.referenceFiles];
+          project.studio.parts.front.referenceLabels = { ...action.referenceLabels };
           return project;
         },
         isArtworkPart: (part) => part === "front",
         MAX_STUDIO_BODY_BYTES: studio.MAX_STUDIO_BODY_BYTES,
-        StudioError: studio.StudioError,
+        StudioError: routeStudio.StudioError,
         validateStudioPrompt: studio.validateStudioPrompt,
-        validateStudioReferenceFiles: async (_projectId, files) => files,
-        validateStudioReferenceLabels: studio.validateStudioReferenceLabels,
+        validateStudioReferenceFiles: routeStudio.validateStudioReferenceFiles,
+        validateStudioReferenceLabels: routeStudio.validateStudioReferenceLabels,
       },
-      "../shared": { acquireDesignLock: () => ({ key: "test", token: "test" }), designBusyResponse: () => new Response(null, { status: 409 }) },
+      "../shared": {
+        acquireDesignLock: () => ({ key: "test", token: "test" }),
+        acquireDesignPartLock: () => ({ key: "test", token: "test" }),
+        designBusyResponse: () => new Response(null, { status: 409 }),
+        designPartBusyResponse: () => new Response(null, { status: 409 }),
+      },
     });
     const draftResponse = await studioRoute.PATCH(new Request("http://127.0.0.1:3219/api/design/studio", {
       method: "PATCH", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ projectId, action: "draft", part: "front", prompt: longPrompt, referenceFiles: [], referenceLabels: {} }),
+      body: JSON.stringify({
+        projectId, action: "draft", part: "front", prompt: longPrompt,
+        referenceFiles: manyReferences, referenceLabels: manyLabels,
+      }),
     }));
     assert.equal(draftResponse.status, 200);
-    assert.equal((await draftResponse.json()).studio.parts.front.prompt, longPrompt);
+    const drafted = await draftResponse.json();
+    assert.equal(drafted.studio.parts.front.prompt, longPrompt);
+    assert.deepEqual(drafted.studio.parts.front.referenceFiles, manyReferences);
+    assert.deepEqual(drafted.studio.parts.front.referenceLabels, manyLabels);
     let generated;
     let saved;
     const route = await loadTs("app/api/design/image/route.ts", {
@@ -179,9 +237,9 @@ test("long studio prompts save and generate while preserving ordered name proven
         isArtworkPart: (part) => part === "front",
         MAX_STUDIO_CANDIDATES: 100,
         MAX_STUDIO_BODY_BYTES: studio.MAX_STUDIO_BODY_BYTES,
-        StudioError: studio.StudioError,
-        validateStudioReferenceFiles: async (_projectId, files) => files,
-        validateStudioReferenceLabels: studio.validateStudioReferenceLabels,
+        StudioError: routeStudio.StudioError,
+        validateStudioReferenceFiles: routeStudio.validateStudioReferenceFiles,
+        validateStudioReferenceLabels: routeStudio.validateStudioReferenceLabels,
       },
       "@/lib/image-generation": {
         codexImageAvailability: async () => ({ connected: true, message: "ready" }),
@@ -197,7 +255,10 @@ test("long studio prompts save and generate while preserving ordered name proven
         },
         ImageGenerationError: class ImageGenerationError extends Error {},
       },
-      "../shared": { acquireDesignLock: () => ({ key: "test", token: "test" }), designBusyResponse: () => new Response(null, { status: 409 }) },
+      "../shared": {
+        acquireDesignPartLock: () => ({ key: "test", token: "test" }),
+        designPartBusyResponse: () => new Response(null, { status: 409 }),
+      },
     });
     async function generate(referenceFiles, referenceLabels, prompt = longPrompt) {
       const response = await route.POST(new Request("http://127.0.0.1:3219/api/design/image", {
@@ -208,13 +269,13 @@ test("long studio prompts save and generate while preserving ordered name proven
       const events = await response.text();
       assert.match(events, /"type":"done"/);
     }
-    await generate(["face.png", "sky.png"], { "face.png": "주인공", "sky.png": "배경" });
-    assert.deepEqual(generated.contents, ["FACE", "SKY", "PARENT"], "parent must be the final attachment");
+    await generate(manyReferences, manyLabels);
+    assert.deepEqual(generated.contents, ["REF-1", "REF-2", "REF-3", "REF-4", "REF-5", "REF-6", "PARENT"], "parent must follow all six explicit references");
     assert.equal(generated.prompt, longPrompt);
-    assert.deepEqual(generated.names, ["주인공", "배경", "변형 원본"]);
+    assert.deepEqual(generated.names, [...Object.values(manyLabels), "변형 원본"]);
     assert.equal(saved.prompt, longPrompt);
-    assert.deepEqual(saved.referenceFiles, ["face.png", "sky.png"]);
-    assert.deepEqual({ ...saved.referenceLabels }, { "face.png": "주인공", "sky.png": "배경" });
+    assert.deepEqual(saved.referenceFiles, manyReferences);
+    assert.deepEqual({ ...saved.referenceLabels }, manyLabels);
     assert.equal(saved.parentCandidateId, parentId);
 
     const variationPrompt = `${longPrompt}\n수정 요청: ${"조명을 밝게 ".repeat(1000).trim()}`;
@@ -224,6 +285,19 @@ test("long studio prompts save and generate while preserving ordered name proven
     assert.deepEqual(generated.contents, ["FACE", "PARENT"], "explicit parent must not be attached twice");
     assert.deepEqual(generated.names, ["주인공", "이전 표지 (변형 원본)"]);
     assert.deepEqual({ ...saved.referenceLabels }, { "face.png": "주인공", "parent.png": "이전 표지" });
+
+    const oversizedReference = "oversized.png";
+    await fs.writeFile(path.join(assets, oversizedReference), "x");
+    await fs.truncate(path.join(assets, oversizedReference), 20 * 1024 * 1024 + 1);
+    const oversizedReferenceResponse = await route.POST(new Request("http://127.0.0.1:3219/api/design/image", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        projectId, part: "front", prompt: "크기 검사",
+        referenceFiles: [oversizedReference], referenceLabels: { [oversizedReference]: "대용량" },
+      }),
+    }));
+    assert.equal(oversizedReferenceResponse.status, 200);
+    assert.match(await oversizedReferenceResponse.text(), /참고 이미지는 20MB 이하의 일반 파일이어야 합니다/);
 
     const oversizedPrompt = "a".repeat(studio.MAX_STUDIO_BODY_BYTES);
     const oversizedDraft = await studioRoute.PATCH(new Request("http://127.0.0.1:3219/api/design/studio", {
@@ -267,11 +341,12 @@ process.stdin.on('end', () => {
     const image = await loadTs("lib/image-generation.ts", {
       "./types": { STUDIO_PART_LABELS: { front: "앞표지" } },
     });
-    const refs = [path.join(directory, "face.png"), path.join(directory, "sky.png")];
+    const refs = Array.from({ length: 6 }, (_, index) => path.join(directory, `reference-${index + 1}.png`));
+    const names = Array.from({ length: 6 }, (_, index) => `참고 ${index + 1}`);
     const longPrompt = "주인공과 배경 ".repeat(20000);
     await assert.rejects(image.generateCodexImage({
       cwd: directory, part: "front", prompt: longPrompt, referencePaths: refs,
-      referenceNames: ["주인공", "배경"], outputPath: path.join(directory, "generated.png"),
+      referenceNames: names, outputPath: path.join(directory, "generated.png"),
     }), /이미지 파일을 만들지 않았습니다/);
     const { argv, prompt } = JSON.parse(await fs.readFile(argvFile, "utf8"));
     const imageFlag = argv.indexOf("-i");
@@ -279,8 +354,10 @@ process.stdin.on('end', () => {
     assert.deepEqual(argv.slice(imageFlag + 1), refs);
     assert.equal(argv[imageFlag - 1], "-", "the prompt must use stdin before the image flag");
     assert.ok(prompt.includes(longPrompt), "the full long prompt reaches stdin");
-    assert.match(prompt, /Attached image 1 \(이미지 1\): "주인공"/);
-    assert.match(prompt, /Attached image 2 \(이미지 2\): "배경"/);
+    for (const [index, name] of names.entries()) {
+      assert.match(prompt, new RegExp(`Attached image ${index + 1} \\(이미지 ${index + 1}\\): "${name}"`));
+    }
+    assert.ok(prompt.indexOf('Attached image 6 (이미지 6): "참고 6"') < prompt.indexOf("User's image request begins:"));
   } finally {
     if (previousBin === undefined) delete process.env.CDSTUDIO_CODEX_BIN;
     else process.env.CDSTUDIO_CODEX_BIN = previousBin;
