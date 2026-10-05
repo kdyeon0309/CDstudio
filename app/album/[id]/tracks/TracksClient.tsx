@@ -20,6 +20,13 @@ import {
   initialExtractSelection,
   MAX_EXTRACT_ITEMS,
 } from "@/lib/extract-contract";
+import {
+  cancelBackgroundJob,
+  listBackgroundJobs,
+  startBackgroundJobIfActive,
+  watchBackgroundJob,
+  type BackgroundJobObserver,
+} from "@/lib/background-job-client";
 
 const WARN_SECONDS = 74 * 60; // 74분 경고
 const MAX_SECONDS = MAX_AUDIO_MINUTES * 60; // 79분 초과 차단
@@ -48,6 +55,9 @@ export default function TracksClient({ projectId }: { projectId: string }) {
   const [selected, setSelected] = useState<boolean[]>([]);
 
   const [extracting, setExtracting] = useState(false);
+  const [jobsReady, setJobsReady] = useState(false);
+  const [recoveryAttempt, setRecoveryAttempt] = useState(0);
+  const [recoveryFailed, setRecoveryFailed] = useState(false);
   const [extractError, setExtractError] = useState<string | null>(null);
   const [inProgress, setInProgress] = useState<InProgress[]>([]);
 
@@ -63,8 +73,14 @@ export default function TracksClient({ projectId }: { projectId: string }) {
     position: "before" | "after";
   } | null>(null);
 
-  const abortRef = useRef<AbortController | null>(null);
+  const observerRef = useRef<BackgroundJobObserver | null>(null);
+  const extractJobIdRef = useRef<string | null>(null);
   const dragIntentRef = useRef<string | null>(null);
+  const mountedRef = useRef(true);
+  const recoveryStartedRef = useRef(false);
+  const projectReady = project !== null;
+
+  useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
 
   // ── 프로젝트 로드 ─────────────────────────────────────────
   // (setState 는 콜백 안에서만 호출 — 이펙트 본문 동기 setState 경고 회피)
@@ -92,9 +108,9 @@ export default function TracksClient({ projectId }: { projectId: string }) {
     void loadProject();
   }, [loadProject]);
 
-  // 언마운트 시 추출 스트림 중단
+  // 언마운트는 관찰만 멈춘다. 서버 작업은 사용자가 중단 버튼을 눌렀을 때만 취소한다.
   useEffect(() => {
-    return () => abortRef.current?.abort();
+    return () => observerRef.current?.stop();
   }, []);
 
   // ── 메타 조회 ─────────────────────────────────────────────
@@ -149,7 +165,7 @@ export default function TracksClient({ projectId }: { projectId: string }) {
 
   // ── 추출 시작 (SSE) ───────────────────────────────────────
   async function handleExtract() {
-    if (!probeResult) return;
+    if (!probeResult || !jobsReady) return;
     const items: ProbeItem[] = probeResult.items.filter((_, i) => selected[i]);
     if (items.length === 0) {
       setExtractError("선택된 곡이 없습니다");
@@ -167,62 +183,35 @@ export default function TracksClient({ projectId }: { projectId: string }) {
     setExtractError(null);
     setInProgress([]);
 
-    const controller = new AbortController();
-    abortRef.current = controller;
-
     try {
-      const res = await fetch("/api/extract", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ projectId, items }),
-        signal: controller.signal,
+      const job = await startBackgroundJobIfActive("/api/extract", { projectId, items }, () => mountedRef.current);
+      if (!job) return;
+      extractJobIdRef.current = job.id;
+      observerRef.current = watchBackgroundJob(job, {
+        onEvent: (rawEvent) => {
+          const event = rawEvent as ExtractEvent;
+          // A retained done event may contain an older whole-project snapshot.
+          // Re-read storage instead of replacing newer title/artist metadata.
+          if (event.type === "done") void loadProject();
+          else handleEvent(event);
+        },
+        onReconnect: () => setExtractError("서버 작업에 다시 연결하는 중입니다…"),
       });
-      if (!res.ok || !res.body) {
-        const raw = await res.text().catch(() => "");
-        let msg = "";
-        try {
-          const parsed = JSON.parse(raw) as { error?: unknown };
-          if (typeof parsed?.error === "string") msg = parsed.error;
-        } catch {
-          msg = raw;
-        }
-        throw new Error(msg || `추출 요청 실패 (${res.status})`);
-      }
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = "";
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        let sep: number;
-        while ((sep = buf.indexOf("\n\n")) >= 0) {
-          const frame = buf.slice(0, sep);
-          buf = buf.slice(sep + 2);
-          const dataLine = frame
-            .split("\n")
-            .find((l) => l.startsWith("data:"));
-          if (!dataLine) continue;
-          try {
-            const event = JSON.parse(dataLine.slice(5).trim()) as ExtractEvent;
-            handleEvent(event);
-          } catch {
-            /* 부분 프레임 무시 */
-          }
-        }
-      }
+      const terminal = await observerRef.current.finished;
+      if (!terminal) return;
+      if (terminal.status === "error") setExtractError(terminal.error ?? "추출에 실패했습니다.");
+      else if (terminal.status === "cancelled") setExtractError("추출을 중단했습니다.");
+      else setExtractError(null);
     } catch (err) {
-      if (controller.signal.aborted) {
-        // 사용자 중단 — 조용히 종료
-      } else {
-        setExtractError(err instanceof Error ? err.message : String(err));
-      }
+      if (mountedRef.current) setExtractError(err instanceof Error ? err.message : String(err));
     } finally {
-      setExtracting(false);
-      abortRef.current = null;
-      // 서버 최종 상태와 동기화
-      void loadProject();
+      if (mountedRef.current) {
+        setExtracting(false);
+        extractJobIdRef.current = null;
+        observerRef.current = null;
+        // 서버 최종 상태와 동기화
+        void loadProject();
+      }
     }
   }
 
@@ -290,10 +279,59 @@ export default function TracksClient({ projectId }: { projectId: string }) {
     }
   }
 
-  function handleStop() {
-    abortRef.current?.abort();
-    setInProgress([]);
-    setExtractError("추출을 중단했습니다.");
+  useEffect(() => {
+    if (!projectReady || recoveryStartedRef.current) return;
+    recoveryStartedRef.current = true;
+    setRecoveryFailed(false);
+    const recovery = new AbortController();
+    listBackgroundJobs(projectId, recovery.signal).then((jobs) => {
+      if (!recovery.signal.aborted) setJobsReady(true);
+      const job = jobs.find((item) => item.endpoint === "/api/extract" && item.status === "running");
+      if (!job || recovery.signal.aborted) {
+        const latest = jobs.find((item) => item.endpoint === "/api/extract");
+        if (latest?.status === "error") setExtractError(latest.error ?? "이전 추출 작업에 실패했습니다.");
+        else if (latest?.status === "cancelled") setExtractError("이전 추출 작업이 중단됐습니다.");
+        void loadProject();
+        return;
+      }
+      extractJobIdRef.current = job.id;
+      setExtracting(true);
+      setExtractError(null);
+      observerRef.current = watchBackgroundJob(job, {
+        onEvent: (rawEvent) => {
+          const event = rawEvent as ExtractEvent;
+          if (event.type === "done") void loadProject();
+          else handleEvent(event);
+        },
+        onReconnect: () => setExtractError("서버 작업에 다시 연결하는 중입니다…"),
+      });
+      void observerRef.current.finished.then((terminal) => {
+        if (!terminal || recovery.signal.aborted) return;
+        setExtracting(false);
+        extractJobIdRef.current = null;
+        if (terminal.status === "error") setExtractError(terminal.error ?? "추출에 실패했습니다.");
+        else if (terminal.status === "cancelled") setExtractError("추출을 중단했습니다.");
+        else setExtractError(null);
+        void loadProject();
+      });
+    }).catch((error: unknown) => {
+      if (!recovery.signal.aborted) {
+        recoveryStartedRef.current = false;
+        setRecoveryFailed(true);
+        setExtractError(`${error instanceof Error ? error.message : String(error)} ‘작업 다시 확인’을 눌러 주세요.`);
+      }
+    });
+    return () => recovery.abort();
+  }, [projectId, loadProject, projectReady, recoveryAttempt]);
+
+  async function handleStop() {
+    const id = extractJobIdRef.current;
+    if (!id) return;
+    try {
+      await cancelBackgroundJob(projectId, id);
+    } catch (error) {
+      setExtractError(error instanceof Error ? error.message : "추출 중단 요청에 실패했습니다.");
+    }
   }
 
   // ── 트랙 편집 (이름/순서/삭제) ───────────────────────────
@@ -507,6 +545,7 @@ export default function TracksClient({ projectId }: { projectId: string }) {
       {/* 음질 상한 고지 (상시) */}
       <div className="mb-6 rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-700/60 dark:bg-amber-950/40 dark:text-amber-300">
         원본이 스트리밍 음원(최대 ~160kbps)이므로 CD 음질 상한이 있습니다.
+        <span className="mt-1 block">다른 화면으로 이동해도 서버에서 계속 진행됩니다.</span>
       </div>
 
       {loadError && (
@@ -514,6 +553,7 @@ export default function TracksClient({ projectId }: { projectId: string }) {
           {loadError}
         </div>
       )}
+      {!jobsReady && recoveryFailed && <button type="button" onClick={() => setRecoveryAttempt((value) => value + 1)} className="mb-4 rounded-md border border-amber-500 px-3 py-2 text-sm text-amber-700">작업 다시 확인</button>}
 
       {/* URL 입력 → 메타 조회 */}
       <section className="mb-8">
@@ -630,6 +670,7 @@ export default function TracksClient({ projectId }: { projectId: string }) {
             <button
               onClick={handleExtract}
               disabled={
+                !jobsReady ||
                 extracting ||
                 saving ||
                 Boolean(editingTrackId) ||
