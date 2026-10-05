@@ -22,6 +22,7 @@ interface Props {
   guides?: boolean;
   screenScale?: number;
   className?: string;
+  embedded?: boolean;
   onOverflow?: (overflow: boolean) => void;
 }
 
@@ -106,16 +107,6 @@ function TextOverlay({
           </ol>
         )}
       </div>
-      {back && !splitBack && (
-        <>
-          <span className={`${styles.spineText} ${styles.spineTextLeft}`} style={{ color: overlay.color }}>
-            {project.artist} · {project.title}
-          </span>
-          <span className={`${styles.spineText} ${styles.spineTextRight}`} style={{ color: overlay.color }}>
-            {project.artist} · {project.title}
-          </span>
-        </>
-      )}
     </>
   );
 }
@@ -168,6 +159,7 @@ export default function ArtworkSheetPreview({
   guides = false,
   screenScale,
   className = "",
+  embedded = false,
   onOverflow,
 }: Props) {
   const clipRef = useRef<HTMLDivElement>(null);
@@ -220,7 +212,47 @@ export default function ArtworkSheetPreview({
   const sheetStyle: CSSProperties | undefined = screenScale ? { zoom: screenScale } : undefined;
   const back = part === "back" || part === "back-inner";
   const label = part === "label";
-  const splitBack = part === "back" && Boolean(spineCandidate && spinePresentation);
+  const splitBack = part === "back";
+
+  const artwork = (
+    <div className={`${styles.part} ${label ? styles.label : ""}`} style={partStyle(part)}>
+      {!embedded && <CropMarks />}
+      {splitBack ? (
+        <div className={styles.contentClip}>
+          <div className={`${styles.splitRegion} ${styles.splitSpineLeft} ${!spineCandidate || !spinePresentation ? styles.neutralSpine : ""}`}>
+            {spineCandidate && spinePresentation && <ArtworkImage projectId={project.id} candidate={spineCandidate} presentation={spinePresentation} />}
+            {spineCandidate && spinePresentation && <SpineText project={project} presentation={spinePresentation} left textRef={spineTextRef} />}
+          </div>
+          <div ref={clipRef} className={`${styles.splitRegion} ${styles.splitCenter}`}>
+            <ArtworkImage projectId={project.id} candidate={candidate} presentation={presentation} />
+            <TextOverlay project={project} part={part} presentation={presentation} splitBack contentRef={contentRef} trackRef={trackRef} />
+          </div>
+          <div className={`${styles.splitRegion} ${styles.splitSpineRight} ${!spineCandidate || !spinePresentation ? styles.neutralSpine : ""}`}>
+            {spineCandidate && spinePresentation && <ArtworkImage projectId={project.id} candidate={spineCandidate} presentation={spinePresentation} />}
+            {spineCandidate && spinePresentation && <SpineText project={project} presentation={spinePresentation} left={false} />}
+          </div>
+          {guides && <span className={styles.safeArea} aria-hidden="true" />}
+        </div>
+      ) : (
+        <div ref={clipRef} className={`${styles.contentClip} ${label ? styles.label : ""}`}>
+          <ArtworkImage projectId={project.id} candidate={candidate} presentation={presentation} />
+          {part === "back-spine"
+            ? <SpineText project={project} presentation={presentation} left={false} textRef={spineTextRef} />
+            : <TextOverlay project={project} part={part} presentation={presentation} contentRef={contentRef} trackRef={trackRef} />}
+          {guides && <span className={styles.safeArea} aria-hidden="true" />}
+        </div>
+      )}
+      {back && !embedded && (
+        <>
+          <span className={`${styles.foldLine} ${styles.foldLeft}`} aria-hidden="true" />
+          <span className={`${styles.foldLine} ${styles.foldRight}`} aria-hidden="true" />
+        </>
+      )}
+      {label && <span className={styles.hole} aria-hidden="true" />}
+    </div>
+  );
+
+  if (embedded) return artwork;
 
   return (
     <div className={`${styles.wrapper} ${className}`} style={wrapperStyle}>
@@ -230,41 +262,7 @@ export default function ArtworkSheetPreview({
         aria-label={`${STUDIO_PART_LABELS[part]} A4 인쇄 미리보기`}
       >
         <span className={styles.sheetLabel}>{STUDIO_PART_LABELS[part]}{back ? " · 점선은 미리보기용, 인쇄 시 위쪽 표식만 표시" : ""}</span>
-        <div className={`${styles.part} ${label ? styles.label : ""}`} style={partStyle(part)}>
-          <CropMarks />
-          {splitBack && spineCandidate && spinePresentation ? (
-            <div className={styles.contentClip}>
-              <div className={`${styles.splitRegion} ${styles.splitSpineLeft}`}>
-                <ArtworkImage projectId={project.id} candidate={spineCandidate} presentation={spinePresentation} />
-                <SpineText project={project} presentation={spinePresentation} left textRef={spineTextRef} />
-              </div>
-              <div ref={clipRef} className={`${styles.splitRegion} ${styles.splitCenter}`}>
-                <ArtworkImage projectId={project.id} candidate={candidate} presentation={presentation} />
-                <TextOverlay project={project} part={part} presentation={presentation} splitBack contentRef={contentRef} trackRef={trackRef} />
-              </div>
-              <div className={`${styles.splitRegion} ${styles.splitSpineRight}`}>
-                <ArtworkImage projectId={project.id} candidate={spineCandidate} presentation={spinePresentation} />
-                <SpineText project={project} presentation={spinePresentation} left={false} />
-              </div>
-              {guides && <span className={styles.safeArea} aria-hidden="true" />}
-            </div>
-          ) : (
-            <div ref={clipRef} className={`${styles.contentClip} ${label ? styles.label : ""}`}>
-              <ArtworkImage projectId={project.id} candidate={candidate} presentation={presentation} />
-              {part === "back-spine"
-                ? <SpineText project={project} presentation={presentation} left={false} textRef={spineTextRef} />
-                : <TextOverlay project={project} part={part} presentation={presentation} contentRef={contentRef} trackRef={trackRef} />}
-              {guides && <span className={styles.safeArea} aria-hidden="true" />}
-            </div>
-          )}
-          {back && (
-            <>
-              <span className={`${styles.foldLine} ${styles.foldLeft}`} aria-hidden="true" />
-              <span className={`${styles.foldLine} ${styles.foldRight}`} aria-hidden="true" />
-            </>
-          )}
-          {label && <span className={styles.hole} aria-hidden="true" />}
-        </div>
+        {artwork}
       </section>
     </div>
   );
