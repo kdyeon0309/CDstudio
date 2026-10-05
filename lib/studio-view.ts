@@ -59,6 +59,16 @@ export interface StudioPrintResolution {
   fullBleed: boolean;
 }
 
+/** Warn about older full-width tray-card images before fitting them into the 137 mm center. */
+export function studioBackMayCropLegacyCandidate(
+  candidate: Pick<StudioCandidate, "width" | "height">,
+  presentation: Pick<StudioPresentation, "fit">,
+): boolean {
+  if (presentation.fit !== "cover" || candidate.width <= 0 || candidate.height <= 0) return false;
+  const centerAspect = (PRINT_SPECS.back.widthMm - 2 * PRINT_SPECS.back.spineMm) / PRINT_SPECS.back.heightMm;
+  return candidate.width / candidate.height > centerAspect * 1.03;
+}
+
 /**
  * Printed pixels per inch after CSS object-fit and the user's scale. `contain`
  * also paints an unscaled blurred cover background at 110% of the panel size;
@@ -70,11 +80,13 @@ export function studioPrintResolution(
   presentation: Pick<StudioPresentation, "fit" | "transform">,
   separateSpine = false,
 ): StudioPrintResolution {
+  // Kept for callers loading older project/UI code; back geometry is now always central-only.
+  void separateSpine;
   const dimensions = part === "label"
     ? { widthMm: PRINT_SPECS.label.outerDiameterMm, heightMm: PRINT_SPECS.label.outerDiameterMm }
     : part === "back-spine"
       ? { widthMm: PRINT_SPECS.back.spineMm, heightMm: PRINT_SPECS.back.heightMm }
-      : part === "back" && separateSpine
+      : part === "back"
         ? { widthMm: PRINT_SPECS.back.widthMm - 2 * PRINT_SPECS.back.spineMm, heightMm: PRINT_SPECS.back.heightMm }
         : { widthMm: PRINT_SPECS[part].widthMm, heightMm: PRINT_SPECS[part].heightMm };
   const { scale, offsetXMm, offsetYMm } = presentation.transform;
