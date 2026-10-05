@@ -3,7 +3,13 @@
  * 프로젝트 갱신은 반드시 updateProjectWith 로 — 장시간 CLI 호출 중
  * 다른 요청이 바꾼 내용을 되돌리지 않기 위함.
  */
-import type { AlbumProject, ArtworkPart, ArtworkState, ArtworkVariant } from "@/lib/types";
+import type {
+  AlbumProject,
+  ArtworkPart,
+  ArtworkState,
+  ArtworkVariant,
+  StudioArtworkPart,
+} from "@/lib/types";
 import { ARTWORK_PARTS } from "@/lib/types";
 import { getProject, updateProjectWith } from "@/lib/storage";
 import { acquireJobLock } from "@/lib/server-guards";
@@ -55,9 +61,26 @@ export function acquireDesignLock(projectId: string): { key: string; token: stri
   return token ? { key, token } : null;
 }
 
+/** 스튜디오 영역 락 — 같은 앨범의 서로 다른 영역 작업은 병렬로 허용한다. */
+export function acquireDesignPartLock(
+  projectId: string,
+  part: StudioArtworkPart,
+): { key: string; token: string } | null {
+  const key = `design:${projectId}:${part}`;
+  const token = acquireJobLock(key);
+  return token ? { key, token } : null;
+}
+
 export function designBusyResponse(): Response {
   return Response.json(
     { error: "이미 이 앨범의 디자인 작업이 진행 중입니다" },
+    { status: 409 },
+  );
+}
+
+export function designPartBusyResponse(): Response {
+  return Response.json(
+    { error: "이미 이 앨범의 해당 영역에서 디자인 작업이 진행 중입니다" },
     { status: 409 },
   );
 }
