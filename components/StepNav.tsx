@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 const STEPS = [
   { seg: "tracks", n: "①", label: "트랙" },
   { seg: "design", n: "②", label: "디자인" },
+  { seg: "preview", n: "◈", label: "완성 모습 3D" },
   { seg: "print", n: "③", label: "인쇄" },
   { seg: "burn", n: "④", label: "굽기" },
 ] as const;
