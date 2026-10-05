@@ -20,7 +20,12 @@ import {
   validateStudioReferenceLabels,
   type StudioAction,
 } from "@/lib/studio";
-import { acquireDesignLock, designBusyResponse } from "../shared";
+import {
+  acquireDesignLock,
+  acquireDesignPartLock,
+  designBusyResponse,
+  designPartBusyResponse,
+} from "../shared";
 import type { AlbumProject, StudioArtworkPart, StudioCandidate } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -304,8 +309,11 @@ export async function PATCH(request: Request) {
     return errorResponse(error);
   }
 
-  const lock = acquireDesignLock(projectId);
-  if (!lock) return designBusyResponse();
+  const partScoped = "part" in action;
+  const lock = "part" in action
+    ? acquireDesignPartLock(projectId, action.part)
+    : acquireDesignLock(projectId);
+  if (!lock) return partScoped ? designPartBusyResponse() : designBusyResponse();
   try {
     const project = await getProject(projectId).catch(() => null);
     if (!project) throw new StudioError("앨범을 찾을 수 없습니다.", 404);
